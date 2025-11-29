@@ -1,0 +1,5 @@
+.env
+.DS_store
+*.png
+airlines.json
+auth_state.json
