@@ -1,0 +1,35 @@
+{
+  "flight_type": "one-way",
+  "nonstop_flights": false,
+  "airline": "",
+  "travel_status": "",
+  "origin": "DXB",
+  "destination": "SIN",
+  "departure": "01/10/2026",
+  "time": "",
+  "class": "",
+  "traveller": [
+    {
+      "name": "Khalifa Melissa Williams",
+      "salutation": "MS"
+    },
+    {
+      "name": "Johnny Young Wang",
+      "salutation": "MR"
+    }
+  ],
+  "travel_partner": [
+    {
+      "type": "Adult",
+      "salutation": "MR",
+      "first_name": "John",
+      "last_name": "Doe"
+    },
+    {
+      "type": "Child",
+      "salutation": "MS",
+      "first_name": "Jane",
+      "last_name": "Doe"
+    }
+  ]
+}

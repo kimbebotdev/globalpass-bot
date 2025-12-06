@@ -10,16 +10,28 @@ Automates login to `https://signon.ual.com/oamfed/idp/initiatesso?providerid=DPm
   - Either export: `export UAL_USERNAME="your_username"` and `export UAL_PASSWORD="your_password"`
   - Or add them to `.env` (see `.env.example`) and the script will load them automatically.
 
-### Run
+### Run (combined login + fill)
 ```
-python main.py                # headless login, saves post_login.png + auth_state.json
-python main.py --headed       # watch the browser
-python main.py --screenshot "" # skip screenshot capture
+python main.py --headed              # login with .env creds, fill form using input.json, capture flightschedule JSON
+python main.py --input custom.json   # use a different input file
+python main.py --screenshot login.png # optional login screenshot
+```
+After a successful run you will have:
+- `auth_state.json` containing the authenticated storage state for reuse
+- `json/<flight_type>-flightschedule.json` saved from the flightschedule POST response
+
+`input.json` example (required keys: origin, destination, departure; optional: airline, flight_type):
+```json
+{
+  "flight_type": "one-way",
+  "origin": "DXB",
+  "destination": "SIN",
+  "departure": "01/10/2026",
+  "airline": "United Airlines"
+}
 ```
 
-After a successful run you will have:
-- `post_login.png` (unless disabled) showing the post-login page
-- `auth_state.json` containing the authenticated storage state for reuse with other Playwright scripts
+If you want login only, run `python login.py` (uses .env creds and writes auth_state.json).
 
 ### Scrape airlines (and capture origin lookup traffic)
 - Ensure `auth_state.json` exists (run `python main.py` first).
@@ -34,3 +46,8 @@ Troubleshooting:
 - If you get redirected to `signon.ual.com`, refresh `auth_state.json` by re-running `python main.py`.
 - If the page shows “not eligible for OA travel”, the current account/session cannot access the OA travel form; use an eligible account and refresh `auth_state.json`.
 - Use `--headed` to visually confirm the page renders and identify any blocking modal/MFA screens.
+
+### Fill flight form
+`fill_form.py` (legacy helper) uses `auth_state.json` and `.env` values to populate the flight schedule form:
+- Required env vars: `INPUT_ORIGIN`, `INPUT_DESTINATION`, `INPUT_DEPARTURE`, `INPUT_AIRLINE` (set `HEADLESS=false` to watch).
+- Run: `python fill_form.py` (add `--headed` to watch, or set `HEADLESS=false`).

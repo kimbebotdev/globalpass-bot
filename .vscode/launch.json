@@ -2,10 +2,25 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: login (main.py)",
+      "name": "Python: main (login + fill)",
       "type": "python",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
+      "python": "${workspaceFolder}/env/bin/python",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+        "--headed"
+      ]
+    },
+    {
+      "name": "Python: login only (login.py)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/login.py",
       "python": "${workspaceFolder}/env/bin/python",
       "console": "integratedTerminal",
       "envFile": "${workspaceFolder}/.env",
@@ -28,6 +43,21 @@
         "--headed",
         "--airport-term",
         "a"
+      ]
+    },
+    {
+      "name": "Python: scrape airlines (fill_form.py)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/fill_form.py",
+      "python": "${workspaceFolder}/env/bin/python",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+        "--headed"
       ]
     }
   ]

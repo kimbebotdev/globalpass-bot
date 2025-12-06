@@ -3,3 +3,6 @@
 *.png
 airlines.json
 auth_state.json
+json
+__pycache__
+.vscode
