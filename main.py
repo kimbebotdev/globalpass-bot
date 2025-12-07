@@ -18,9 +18,23 @@ def read_input(path: str) -> Dict[str, Any]:
         raise SystemExit(f"Input file not found: {input_path}")
     data = json.loads(input_path.read_text())
     # Required fields
-    for key in ["origin", "destination", "departure"]:
+    for key in ["origin", "destination"]:
         if not data.get(key):
             raise SystemExit(f"Missing required field '{key}' in {input_path}")
+    # Itinerary validation
+    flight_type = data.get("flight_type", "one-way").lower()
+    itinerary = data.get("itinerary", [])
+    if flight_type == "one-way":
+        if not itinerary or len(itinerary) < 1:
+            raise SystemExit("itinerary must contain at least one entry for one-way trips.")
+    elif flight_type == "round-trip":
+        if not itinerary or len(itinerary) < 2:
+            raise SystemExit("itinerary must contain two entries (departure, return) for round-trip.")
+    elif flight_type == "multiple-legs":
+        # Not implemented yet; allow but warn
+        print("Warning: multiple-legs not fully supported yet; using first itinerary leg only.")
+    else:
+        raise SystemExit(f"Unsupported flight_type '{flight_type}'. Use one-way, round-trip, or multiple-legs.")
     return data
 
 
@@ -88,6 +102,104 @@ async def select_react_select(page, selector: str, value: str) -> None:
     except PlaywrightTimeout:
         await input_el.press("Enter")
 
+async def trigger_nonstop_flights(page, selector: str, value: str) -> None:
+    container = page.locator(selector).first
+    switch = container.locator(".switch-handle").first
+    is_active = switch.get_attribute("active")
+
+    if is_active:
+        await switch.click()
+
+async def select_flight_type(page, flight_type: str) -> None:
+    """Click the flight type tab based on input (one-way, round-trip, multiple-legs)."""
+    mapping = {
+        "one-way": "One Way",
+        "round-trip": "Round Trip",
+        "multiple-legs": "Multiple Legs",
+    }
+    label = mapping.get(flight_type.lower())
+    if not label:
+        return
+    tab = page.locator(f"{config.FLIGHT_TYPE} li", has_text=label).first
+    if await tab.count():
+        await tab.click()
+
+
+async def fill_text_input(page, selector: str, value: str, placeholder_hint: str | None = None) -> bool:
+    """
+    Fill a simple text input; returns True if something was filled.
+    Optionally uses a placeholder hint if the primary selector is missing.
+    """
+    field = page.locator(selector).first
+    if not await field.count() and placeholder_hint:
+        field = page.locator(f'input[placeholder*="{placeholder_hint}" i]').first
+    if await field.count():
+        await field.click()
+        await field.fill("")
+        await field.type(value)
+        await field.press("Enter")
+        return True
+    return False
+
+
+def _input_locator(container, field_id: str, name_val: str | None = None, placeholder_hint: str | None = None):
+    """
+    Build a locator that tries id, then name, then placeholder within a container.
+    """
+    parts = [f"input#{field_id}"]
+    if name_val:
+        parts.append(f"input[name='{name_val}']")
+    if placeholder_hint:
+        parts.append(f'input[placeholder*="{placeholder_hint}" i]')
+    selector = ", ".join(parts)
+    return container.locator(selector)
+
+
+async def _fill_input(locator, value: str) -> bool:
+    """
+    Try to fill a given locator, falling back to JS set if typing fails.
+    """
+    if not await locator.count():
+        return False
+    handle = locator.first
+    try:
+        await handle.scroll_into_view_if_needed()
+        await handle.click(force=True)
+    except Exception:
+        pass
+    try:
+        await handle.fill("")
+        await handle.type(value)
+        await handle.press("Enter")
+    except Exception:
+        pass
+    # If the value didn't stick, force-set via JS.
+    try:
+        current = await handle.input_value()
+        if current.strip() != value.strip():
+            await handle.evaluate(
+                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                value,
+            )
+    except Exception:
+        pass
+    return True
+
+
+async def fill_leg_fields(container, date_val: str, time_val: str, class_val: str) -> None:
+    """
+    Fill date, time, and class fields within a specific container (for round-trip duplicate groups).
+    """
+    if date_val:
+        date_input = _input_locator(container, config.DATE_SELECTOR.lstrip("#"), placeholder_hint="Date")
+        await _fill_input(date_input, date_val)
+    if time_val:
+        time_input = _input_locator(container, config.TIME_SELECTOR.lstrip("#"), name_val="Time", placeholder_hint="Time")
+        await _fill_input(time_input, time_val)
+    if class_val:
+        class_input = _input_locator(container, config.CLASS_SELECTOR.lstrip("#"), name_val="Class", placeholder_hint="Class")
+        await _fill_input(class_input, class_val)
+
 
 async def close_modal_if_present(page) -> None:
     # Try a few common close buttons.
@@ -140,8 +252,6 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
 
 
 async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
-    # home_url = await goto_home(page)
-    # print(f"Opened {home_url}")
     print("Successful login")
 
     # Click "New Flight" first, then close modal if it appears.
@@ -151,17 +261,15 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
         await page.wait_for_timeout(2000)
         await close_modal_if_present(page)
 
-    # schedule_section = page.locator("div.styles_flightScheduleContent__GDxe9").first
-    # await schedule_section.scroll_into_view_if_needed()
+    # TODO: Traveller selection modal
 
-    await type_and_select_autocomplete(page, config.ORIGIN_SELECTOR, input_data["origin"])
-    await type_and_select_autocomplete(page, config.DEST_SELECTOR, input_data["destination"])
+    # Select flight type tab
+    flight_type = input_data.get("flight_type", "one-way").lower()
+    await select_flight_type(page, flight_type)
 
-    date_input = page.locator(config.DATE_SELECTOR).first
-    await date_input.click()
-    await date_input.fill("")
-    await date_input.type(input_data["departure"])
-    await date_input.press("Enter")
+    only_nonstop_flights = input_data.get("nonstop_flights", "")
+    if only_nonstop_flights:
+        await trigger_nonstop_flights(page, config.NONSTOP_FLIGHTS_CONTAINER, only_nonstop_flights)
 
     airline = input_data.get("airline", "")
     if airline:
@@ -171,21 +279,34 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     if travel_status:
         await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status)
 
-    time_val = input_data.get("time", "")
-    if time_val:
-        time_input = page.locator(config.TIME_SELECTOR).first
-        await time_input.click()
-        await time_input.fill("")
-        await time_input.type(time_val)
-        await time_input.press("Enter")
+    itinerary = input_data.get("itinerary", [])
+    departure_leg = itinerary[0] if itinerary else {}
+    return_leg = itinerary[1] if flight_type == "round-trip" and len(itinerary) > 1 else None
 
-    class_val = input_data.get("class", "")
-    if class_val:
-        class_input = page.locator(config.CLASS_SELECTOR).first
-        await class_input.click()
-        await class_input.fill("")
-        await class_input.type(class_val)
-        await class_input.press("Enter")
+    await type_and_select_autocomplete(page, config.ORIGIN_SELECTOR, input_data["origin"])
+    await type_and_select_autocomplete(page, config.DEST_SELECTOR, input_data["destination"])
+
+    # Containers for date/time/class groups (one per leg for round-trip).
+    leg_containers = page.locator(config.LEG_SELECTOR)
+    # Departure leg
+    if departure_leg:
+        container = leg_containers.nth(0) if await leg_containers.count() else page
+        await fill_leg_fields(
+            container,
+            departure_leg.get("date", ""),
+            departure_leg.get("time", ""),
+            departure_leg.get("class", ""),
+        )
+
+    # Return leg (round-trip) uses second container if present, otherwise falls back to page.
+    if return_leg:
+        container = leg_containers.nth(1) if await leg_containers.count() > 1 else page
+        await fill_leg_fields(
+            container,
+            return_leg.get("date", ""),
+            return_leg.get("time", ""),
+            return_leg.get("class", ""),
+        )
 
     await page.wait_for_timeout(500)
 

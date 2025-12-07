@@ -25,6 +25,8 @@ CLASS_SELECTOR = "#Class"
 NEW_FLIGHT_SELECTOR = "#new-flight"
 SUBMIT_SELECTOR = ".styles_searchButton__m0ovc"
 FLIGHT_TYPE = ".styles_findFlightsTabsContainer__gw3cO"
+NONSTOP_FLIGHTS_CONTAINER = ".styles_toggleButtonsWrapper__UrVTR"
+LEG_SELECTOR = "div.styles_dateTimeClassContainer__Fku9u"
 
 # Output
 FLIGHTSCHEDULE_OUTPUT = Path("json/flightschedule.json")
