@@ -19,12 +19,14 @@
   ],
   "traveller": [
     {
-      "name": "Khalifa Melissa Williams",
-      "salutation": "MS"
+      "name": "Khalifah Melissa Williams",
+      "salutation": "MR",
+      "checked": true
     },
     {
       "name": "Johnny Young Wang",
-      "salutation": "MR"
+      "salutation": "MR",
+      "checked": true
     }
   ],
   "travel_partner": [

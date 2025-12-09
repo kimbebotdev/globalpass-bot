@@ -62,21 +62,6 @@ async def perform_login(context, headless: bool, screenshot: str | None):
     return page
 
 
-async def goto_home(page) -> str:
-    for url in config.BASE_URLS:
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1200)
-            if await page.locator("div.styles_flightScheduleContent__GDxe9").first.is_visible():
-                return page.url
-            await page.wait_for_timeout(2000)
-            if await page.locator("div.styles_flightScheduleContent__GDxe9").first.is_visible():
-                return page.url
-        except Exception:
-            continue
-    raise RuntimeError("Could not reach the flight schedule page with the current auth state.")
-
-
 async def type_and_select_autocomplete(page, selector: str, value: str) -> None:
     field = page.locator(selector).first
     await field.click()
@@ -219,6 +204,90 @@ async def close_modal_if_present(page) -> None:
                 continue
 
 
+async def apply_traveller_selection(page, travellers: list[dict]) -> None:
+    """Check/uncheck travellers in the modal based on input list and set salutation when provided."""
+    if not travellers:
+        await close_modal_if_present(page)
+        return
+
+    # Wait briefly for modal to render.
+    await page.wait_for_timeout(500)
+    items = page.locator(config.TRAVELLER_ITEM_SELECTOR)
+    count = await items.count()
+    if count == 0:
+        await close_modal_if_present(page)
+        return
+
+    # Build a lookup of desired checks by lowercased name.
+    desired = {}
+    for trav in travellers:
+        name = (trav.get("name") or "").strip()
+        if not name:
+            continue
+        desired[name.lower()] = {
+            "checked": bool(trav.get("checked", False)),
+            "salutation": (trav.get("salutation") or "").strip().upper(),
+        }
+
+    for idx in range(count):
+        item = items.nth(idx)
+        name_text = (await item.locator(config.TRAVELLER_NAME_SELECTOR).inner_text()).strip()
+        name_key = name_text.lower()
+
+        if name_key not in desired:
+            continue
+
+        desired_state = desired[name_key]
+        should_check = desired_state["checked"]
+        checkbox = item.locator(config.TRAVELLER_CHECKBOX_SELECTOR).first
+
+        if not await checkbox.count():
+            continue
+
+        try:
+            checked = await checkbox.is_checked()
+        except Exception:
+            checked = False
+
+        if should_check and not checked:
+            await checkbox.check(force=True)
+        elif not should_check and checked:
+            await checkbox.uncheck(force=True)
+
+        # Apply salutation if provided (MR/MS) using the dropdown sibling to this traveller item.
+        salutation = desired_state.get("salutation")
+        if salutation in {"MR", "MS"}:
+            parent = item.locator("xpath=..")
+            dropdowns = parent.locator(config.TRAVELLER_SALUTATION_TOGGLE)
+            dropdown = dropdowns.nth(idx) if await dropdowns.count() > idx else dropdowns.first
+            if not await dropdown.count():
+                dropdown = page.locator(config.TRAVELLER_SALUTATION_TOGGLE).nth(idx) if await page.locator(config.TRAVELLER_SALUTATION_TOGGLE).count() > idx else page.locator(config.TRAVELLER_SALUTATION_TOGGLE).first
+            if await dropdown.count():
+                try:
+                    await dropdown.click()
+                    await page.wait_for_timeout(150)
+                    # Scope menu to the same parent block when possible.
+                    menu = parent.locator(".styles_LabelWithDropdown_DropdownMenu__UXOnK.dropdown-menu.show").first
+                    if not await menu.count():
+                        menus = page.locator(".styles_LabelWithDropdown_DropdownMenu__UXOnK.dropdown-menu.show")
+                        menu = menus.last
+                    option = menu.locator("button.dropdown-item", has_text=salutation).first
+                    if await option.count():
+                        await option.click()
+                except Exception:
+                    # Ignore salutation failures and continue.
+                    pass
+
+    # Add travel partner
+
+    continue_button = page.locator(config.TRAVELLER_CONTINUE_BUTTON)
+    if continue_button.count():
+        continue_button.click()
+        await page.wait_for_timeout(500)
+
+    await close_modal_if_present(page)
+
+
 async def submit_form_and_capture(page, output_path: Path) -> None:
     loop = asyncio.get_event_loop()
     flightschedule_future: asyncio.Future = loop.create_future()
@@ -258,10 +327,10 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first
     if await new_flight_btn.count():
         await new_flight_btn.click()
-        await page.wait_for_timeout(2000)
-        await close_modal_if_present(page)
+        await page.wait_for_timeout(3000)
 
-    # TODO: Traveller selection modal
+    travellers = input_data.get("traveller", [])
+    await apply_traveller_selection(page, travellers)
 
     # Select flight type tab
     flight_type = input_data.get("flight_type", "one-way").lower()
