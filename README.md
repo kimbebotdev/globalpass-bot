@@ -13,25 +13,30 @@ Automates login to `https://signon.ual.com/oamfed/idp/initiatesso?providerid=DPm
 ### Run (combined login + fill)
 ```
 python main.py --headed              # login with .env creds, fill form using input.json, capture flightschedule JSON
-python main.py --input custom.json   # use a different input file
+python main.py --input custom.json   # use a different input file (see templates below)
 python main.py --screenshot login.png # optional login screenshot
 ```
 After a successful run you will have:
 - `auth_state.json` containing the authenticated storage state for reuse
-- `json/<flight_type>-flightschedule.json` saved from the flightschedule POST response
-
-`input.json` example (required keys: origin, destination, departure; optional: airline, flight_type):
-```json
-{
-  "flight_type": "one-way",
-  "origin": "DXB",
-  "destination": "SIN",
-  "departure": "01/10/2026",
-  "airline": "United Airlines"
-}
-```
+- `json/flightschedule.json` saved from the flightschedule POST response
 
 If you want login only, run `python login.py` (uses .env creds and writes auth_state.json).
+
+### Input format (JSON)
+Use the supplied templates (`input-one-way.json`, `input-round-trip.json`, `input-multiple-legs.json`, `input-template.json`) as a guide.
+
+Core fields:
+- `flight_type`: `"one-way"`, `"round-trip"`, or `"multiple-legs"`
+- `trips`: array of legs with `origin` and `destination` (one item for one-way/round-trip; multiple items for multiple-legs)
+- `itinerary`: array aligned to legs with `date`, `time`, `class`
+- `airline`: optional airline selector value
+- `travel_status`: optional travel status selector value
+- `traveller`: array of travellers for the modal (each: `name`, `checked`, `salutation` MR/MS)
+- `travel_partner`: array of partners (each: `type` Adult/Child, `salutations` MR/MS for adults, `dob` for children, `first_name`, `last_name`)
+- `nonstop_flights`: optional flag (truthy to toggle only-nonstop)
+
+Examples:
+- `input-template.json`
 
 ### Scrape airlines (and capture origin lookup traffic)
 - Ensure `auth_state.json` exists (run `python main.py` first).

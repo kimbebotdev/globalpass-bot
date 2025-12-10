@@ -1,0 +1,45 @@
+{
+  "flight_type": "multiple-legs",
+  "nonstop_flights": true,
+  "airline": "",
+  "travel_status": "Bookable",
+  "trips": [
+    {
+      "origin": "DXB",
+      "destination": "SIN"
+    },
+    {
+      "origin": "SIN",
+      "destination": "DXB"
+    },
+    {
+      "origin": "DXB",
+      "destination": "SIN"
+    }
+  ],
+  "itinerary": [
+    {
+      "date": "01/10/2026",
+      "time": "01:00",
+      "class": "Economy"
+    },
+    {
+      "date": "01/20/2026",
+      "time": "02:00",
+      "class": "First"
+    },
+    {
+      "date": "02/20/2026",
+      "time": "03:00",
+      "class": "First"
+    }
+  ],
+  "traveller": [
+    {
+      "name": "Khalifah Melissa Williams",
+      "salutation": "MR",
+      "checked": true
+    }
+  ],
+  "travel_partner": []
+}

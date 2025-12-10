@@ -1,8 +1,8 @@
 .env
 .DS_store
-*.png
+__pycache__
+.vscode
+
 airlines.json
 auth_state.json
 json
-__pycache__
-.vscode
