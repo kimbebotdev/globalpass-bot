@@ -41,3 +41,15 @@ TRAVEL_PARTNER_ADD = "#saveTravellerButton"
 
 # Output
 FLIGHTSCHEDULE_OUTPUT = Path("json/flightschedule.json")
+
+# StaffTraveler search selectors
+STAFF_ADD_FLIGHT_BUTTON = "button.css-1igkrml"
+STAFF_FLIGHT_CONTAINER = "div.css-1wbljes"
+STAFF_FROM_TEMPLATE = "#from-{index}"
+STAFF_TO_TEMPLATE = "#to-{index}"
+STAFF_DATE_TEMPLATE = "#dates-{index}"
+STAFF_AUTOSUGGEST_INPUT = 'input[aria-autocomplete="list"]'
+STAFF_SEARCH_BUTTON = "button.css-3tlp5u"
+STAFF_RESULTS_CONTAINER = "div.css-1y0bycm"
+STAFF_RESULTS_OUTPUT = Path("json/stafftraveller_results.json")
+STAFF_DATE_DONE_BUTTON = "button.css-r7xd4a"

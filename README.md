@@ -9,6 +9,7 @@ Automates login to `https://signon.ual.com/oamfed/idp/initiatesso?providerid=DPm
 - Add credentials (loaded via python-dotenv if present):
   - Either export: `export UAL_USERNAME="your_username"` and `export UAL_PASSWORD="your_password"`
   - Or add them to `.env` (see `.env.example`) and the script will load them automatically.
+  - For StaffTraveler login only: set `ST_USERNAME` and `ST_PASSWORD` in your shell or `.env`.
 
 ### Run (combined login + fill)
 ```
@@ -21,6 +22,8 @@ After a successful run you will have:
 - `json/flightschedule.json` saved from the flightschedule POST response
 
 If you want login only, run `python login.py` (uses .env creds and writes auth_state.json).
+
+For StaffTraveler login only, run `python stafftraveller_login.py --headed` to verify the flow. It writes `stafftraveller_auth_state.json` and accepts `--screenshot`/`--storage-state` flags.
 
 ### Input format (JSON)
 Use the supplied templates (`input-one-way.json`, `input-round-trip.json`, `input-multiple-legs.json`, `input-template.json`) as a guide.
