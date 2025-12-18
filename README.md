@@ -26,7 +26,7 @@ If you want login only, run `python login.py` (uses .env creds and writes auth_s
 For StaffTraveler login only, run `python stafftraveller_login.py --headed` to verify the flow. It writes `stafftraveller_auth_state.json` and accepts `--screenshot`/`--storage-state` flags.
 
 ### Input format (JSON)
-Use the supplied templates (`input-one-way.json`, `input-round-trip.json`, `input-multiple-legs.json`, `input-template.json`) as a guide.
+Use the supplied templates from `input-template.json` as a guide. Use the value of the `details` property as the contents of your `input.json`.
 
 Core fields:
 - `flight_type`: `"one-way"`, `"round-trip"`, or `"multiple-legs"`

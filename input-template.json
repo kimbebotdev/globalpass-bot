@@ -1,45 +1,134 @@
-{
-  "flight_type": "multiple-legs",
-  "nonstop_flights": true,
-  "airline": "",
-  "travel_status": "Bookable",
-  "trips": [
-    {
-      "origin": "DXB",
-      "destination": "SIN"
-    },
-    {
-      "origin": "SIN",
-      "destination": "DXB"
-    },
-    {
-      "origin": "DXB",
-      "destination": "SIN"
+[
+  {
+    "sample_name": "One Way",
+    "details": {
+      "flight_type": "one-way",
+      "nonstop_flights": true,
+      "airline": "",
+      "travel_status": "Bookable",
+      "trips": [
+        {
+          "origin": "DXB",
+          "destination": "SIN"
+        }
+      ],
+      "itinerary": [
+        {
+          "date": "01/10/2026",
+          "time": "00:00",
+          "class": "Economy"
+        }
+      ],
+      "traveller": [
+        {
+          "name": "Khalifah Melissa Williams",
+          "salutation": "MR",
+          "checked": true
+        }
+      ],
+      "travel_partner": []
     }
-  ],
-  "itinerary": [
-    {
-      "date": "01/10/2026",
-      "time": "01:00",
-      "class": "Economy"
-    },
-    {
-      "date": "01/20/2026",
-      "time": "02:00",
-      "class": "First"
-    },
-    {
-      "date": "02/20/2026",
-      "time": "03:00",
-      "class": "First"
+  },
+  {
+    "sample_name": "Round Trip",
+    "details": {
+      "flight_type": "round-trip",
+      "nonstop_flights": true,
+      "airline": "",
+      "travel_status": "Bookable",
+      "trips": [
+        {
+          "origin": "DXB",
+          "destination": "SIN"
+        }
+      ],
+      "itinerary": [
+        {
+          "date": "01/10/2026",
+          "time": "00:00",
+          "class": "Economy"
+        },
+        {
+          "date": "01/20/2026",
+          "time": "00:00",
+          "class": "Economy"
+        }
+      ],
+      "traveller": [
+        {
+          "name": "Khalifah Melissa Williams",
+          "salutation": "MR",
+          "checked": true
+        },
+        {
+          "name": "Johnny Young Wang",
+          "salutation": "MR",
+          "checked": true
+        }
+      ],
+      "travel_partner": [
+        {
+          "type": "Adult",
+          "salutation": "MR",
+          "first_name": "John",
+          "last_name": "Doe"
+        },
+        {
+          "type": "Child",
+          "first_name": "Jane",
+          "last_name": "Doe",
+          "dob": "01/01/2020",
+          "own_seat": true
+        }
+      ]
     }
-  ],
-  "traveller": [
-    {
-      "name": "Khalifah Melissa Williams",
-      "salutation": "MR",
-      "checked": true
+  },
+  {
+    "sample_name": "Multiple Legs / Multi-City",
+    "details": {
+      "flight_type": "multiple-legs",
+      "nonstop_flights": true,
+      "airline": "",
+      "travel_status": "Bookable",
+      "trips": [
+        {
+          "origin": "DXB",
+          "destination": "SIN"
+        },
+        {
+          "origin": "SIN",
+          "destination": "DXB"
+        },
+        {
+          "origin": "DXB",
+          "destination": "SIN"
+        }
+      ],
+      "itinerary": [
+        {
+          "date": "01/10/2026",
+          "time": "01:00",
+          "class": "Economy"
+        },
+        {
+          "date": "01/20/2026",
+          "time": "02:00",
+          "class": "First"
+        },
+        {
+          "date": "02/20/2026",
+          "time": "03:00",
+          "class": "First"
+        }
+      ],
+      "traveller": [
+        {
+          "name": "Khalifah Melissa Williams",
+          "salutation": "MR",
+          "checked": true
+        }
+      ],
+      "travel_partner": []
     }
-  ],
-  "travel_partner": []
-}
+  }
+]
