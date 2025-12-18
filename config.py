@@ -42,6 +42,26 @@ TRAVEL_PARTNER_ADD = "#saveTravellerButton"
 # Output
 FLIGHTSCHEDULE_OUTPUT = Path("json/flightschedule.json")
 
+# Google Flights selectors
+GF_FORM_CONTAINER = "div.AJxgH"
+GF_FIELDS_CONTAINER = "div.uUZzx"
+GF_TRIP_TYPE_TOGGLE = "div.Maqf5d > div:nth-child(1) div.VfPpkd-TkwUic"
+GF_TRIP_TYPE_OPTIONS = "div.Maqf5d > div:nth-child(1) ul li"
+GF_PASSENGER_TOGGLE = "div.Maqf5d > div:nth-child(2) .cQnuXe button"
+GF_PAX_ADD_ADULT = "button[data-tooltip-id='tt-i12']"
+GF_PAX_ADD_CHILD = "button[data-tooltip-id='tt-i14']"
+GF_PAX_ADD_INFANT_SEAT = "button[data-tooltip-id='tt-i16']"
+GF_PAX_ADD_INFANT_LAP = "button[data-tooltip-id='tt-i18']"
+GF_CLASS_TOGGLE = "div.Maqf5d > div:nth-child(3) div.VfPpkd-TkwUic"
+GF_CLASS_OPTIONS = "div.Maqf5d > div:nth-child(3) ul li"
+GF_LEG_ROW = "div.uUZzx > div"
+GF_FROM_INPUT = "input[aria-label*='Where from' i], input[placeholder*='Where from' i]"
+GF_TO_INPUT = "input[aria-label*='Where to' i], input[placeholder*='Where to' i]"
+GF_DEPART_INPUT = "input[aria-label*='Depart' i], input[placeholder*='Depart' i]"
+GF_ADD_FLIGHT_BUTTON = "button:has-text('Add flight'), button:has-text('Add another flight')"
+GF_OVERLAY_INPUT = "div[id^='i'] input[aria-autocomplete='list']"
+GF_OVERLAY_OPTIONS = "div[id^='i'] [role='option']"
+
 # StaffTraveler search selectors
 STAFF_ADD_FLIGHT_BUTTON = "button.css-1igkrml"
 STAFF_FLIGHT_CONTAINER = "div.css-1wbljes"
