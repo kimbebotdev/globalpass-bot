@@ -212,6 +212,146 @@ async def _fill_input(locator, value: str) -> bool:
     return True
 
 
+async def _fill_time_input(handle, value: str) -> bool:
+    """
+    Fill a time input by clicking it and selecting from the dropdown menu.
+    Follows the same pattern as _fill_input but handles time dropdowns.
+    
+    Args:
+        locator: Playwright locator for the time input element
+        value: Time string in format "HH:MM" (e.g., "14:30", "09:00", "00:00")
+    
+    Returns:
+        bool: True if time was successfully selected, False otherwise
+    """
+    if not value:
+        return False
+    
+    if not await handle.count():
+        return False
+    
+    page_obj = getattr(handle, "page", None)
+    
+    if not page_obj:
+        print("Warning: No page object found for time input")
+        return False
+    
+    try:
+        # Parse the time value
+        parts = value.strip().split(":")
+        if len(parts) != 2:
+            print(f"Invalid time format: {value}. Expected HH:MM")
+            return False
+        
+        hour = parts[0].strip().lstrip("0") or "0"
+        minute = parts[1].strip().lstrip("0") or "0"
+        
+        # Format variations to try matching in dropdown
+        formats_to_try = [
+            f"{hour.zfill(2)} :{minute.zfill(2)}",  # "01 :30"
+            f"{hour.zfill(2)}:{minute.zfill(2)}",    # "01:30"
+            f"{hour} :{minute.zfill(2)}",            # "1 :30"
+            f"{hour}:{minute.zfill(2)}",              # "1:30"
+        ]
+        
+        # Click the input to open dropdown
+        try:
+            await handle.scroll_into_view_if_needed()
+            await handle.click()
+            await page_obj.wait_for_timeout(400)
+        except Exception:
+            try:
+                await handle.click(force=True)
+                await page_obj.wait_for_timeout(400)
+            except Exception as e:
+                print(f"Could not click time input: {e}")
+                return False
+        
+        # Wait for dropdown to appear
+        try:
+            await page_obj.wait_for_selector('div[role="menu"][id*="dropdown-menu"].show', timeout=2000, state="visible")
+        except Exception:
+            print("Dropdown menu did not appear")
+            # Try fallback: direct input
+            return await _fill_time_fallback(handle, value)
+        
+        # Find the dropdown menu - it should be visible now
+        dropdown = page_obj.locator('div[role="menu"][id*="dropdown-menu"].show').first
+        if not await dropdown.count() or not await dropdown.is_visible():
+            print("Dropdown menu not visible")
+            return await _fill_time_fallback(handle, value)
+        
+        # Find all menu items
+        menu_items = dropdown.locator('button[role="menuitem"]')
+        items_count = await menu_items.count()
+        
+        # Try to find matching time
+        selected = False
+        for format_str in formats_to_try:
+            if selected:
+                break
+                
+            for i in range(items_count):
+                try:
+                    item = menu_items.nth(i)
+                    item_text = (await item.inner_text()).strip()
+                    
+                    if item_text == format_str:
+                        try:
+                            await item.scroll_into_view_if_needed()
+                            await page_obj.wait_for_timeout(100)
+                            await item.click()
+                            await page_obj.wait_for_timeout(300)
+                            selected = True
+                            break
+                        except Exception:
+                            try:
+                                await item.click(force=True)
+                                await page_obj.wait_for_timeout(300)
+                                selected = True
+                                break
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+        
+        if not selected:
+            print(f"Could not find matching time option for: {value}")
+            return await _fill_time_fallback(handle, value)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error in _fill_time_input: {e}")
+        # Fallback to direct input
+        return await _fill_time_fallback(handle, value)
+
+
+async def _fill_time_fallback(handle, value: str) -> bool:
+    """
+    Fallback method: directly set the time input value if dropdown fails.
+    """
+    try:
+        await handle.fill("")
+        await handle.type(value)
+        await handle.press("Enter")
+    except Exception:
+        pass
+    
+    # Force-set via JS if typing didn't work
+    try:
+        current = await handle.input_value()
+        if current.strip() != value.strip():
+            await handle.evaluate(
+                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                value,
+            )
+        return True
+    except Exception as e:
+        print(f"Fallback also failed: {e}")
+        return False
+
+
 async def fill_leg_fields(container, date_val: str, time_val: str, class_val: str) -> None:
     """
     Fill date, time, and class fields within a specific container (for round-trip duplicate groups).
@@ -221,7 +361,7 @@ async def fill_leg_fields(container, date_val: str, time_val: str, class_val: st
         await _fill_input(date_input, date_val)
     if time_val:
         time_input = _input_locator(container, config.TIME_SELECTOR.lstrip("#"), name_val="Time", placeholder_hint="Time")
-        await _fill_input(time_input, time_val)
+        await _fill_time_input(time_input, time_val)
     if class_val:
         class_input = _input_locator(container, config.CLASS_SELECTOR.lstrip("#"), name_val="Class", placeholder_hint="Class")
         await _fill_input(class_input, class_val)
