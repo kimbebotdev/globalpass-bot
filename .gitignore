@@ -1,8 +1,11 @@
 .env
-.DS_store
-*.png
-airlines.json
-auth_state.json
-json
-__pycache__
+
 .vscode
+.DS_store
+__pycache__
+
+json
+
+# Ignore auto generated files from root
+*.json
+*.png
