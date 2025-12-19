@@ -526,6 +526,30 @@ def _compute_passenger_clicks(input_data: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+async def _wait_for_results(page, timeout_ms: int = 15000) -> None:
+    """
+    Wait for visible flight listitems to appear in the main results container.
+    Helps avoid scraping before the DOM renders (e.g., when running without breakpoints).
+    """
+    start = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start) * 1000 < timeout_ms:
+        # Prefer the main container; fall back to any listitem.
+        main_items = page.locator("div.FXkZv[role='main'] li[role='listitem']")
+        try:
+            count = await main_items.count()
+            if count > 0:
+                return
+        except Exception:
+            pass
+        generic_items = page.locator("li[role='listitem']")
+        try:
+            if await generic_items.count():
+                return
+        except Exception:
+            pass
+        await page.wait_for_timeout(300)
+
+
 async def _switch_trip_type(page, desired: str) -> None:
     form = page.locator(config.GF_FORM_CONTAINER).first
     toggle = form.locator(config.GF_TRIP_TYPE_TOGGLE).first
@@ -981,9 +1005,12 @@ async def scrape_basic_form(
         await _apply_nonstop_filter(page)
 
     try:
-        await page.wait_for_selector("[role='listitem']", timeout=12000)
-    except PlaywrightTimeout:
-        pass
+        await _wait_for_results(page, timeout_ms=15000)
+    except Exception:
+        try:
+            await page.wait_for_selector("[role='listitem']", timeout=8000)
+        except PlaywrightTimeout:
+            pass
 
     flights = await _scrape_results(page, limit=limit)
     if not any(flights.values()):
@@ -1152,7 +1179,20 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
         except PlaywrightTimeout:
             pass
 
+        if nonstop_only:
+            await _apply_nonstop_filter(page)
+
+        try:
+            await _wait_for_results(page, timeout_ms=15000)
+        except Exception:
+            try:
+                await page.wait_for_selector("[role='listitem']", timeout=8000)
+            except PlaywrightTimeout:
+                pass
+
         flights = await _scrape_results(page, limit=limit)
+        if not any(flights.values()):
+            flights = {"top_flights": [], "other_flights": [], "all": []}
         results.append(
             {
                 "type": "multi-city" if flight_type == "multiple-legs" and len(legs) > 1 else flight_type,
