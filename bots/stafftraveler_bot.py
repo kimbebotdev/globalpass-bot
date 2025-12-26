@@ -3,14 +3,20 @@ import asyncio
 import json
 import os
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
 
 import config
-from main import read_input
+from bots.myidtravel_bot import read_input
 
 load_dotenv()
 

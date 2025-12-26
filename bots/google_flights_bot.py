@@ -2,14 +2,19 @@ import argparse
 import asyncio
 import json
 import re
-from datetime import datetime, date
+import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
+
 import config
-from main import read_input
+from bots.myidtravel_bot import read_input
 
 
 # Output path for captured Google Flights results.
