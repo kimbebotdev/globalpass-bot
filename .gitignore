@@ -9,3 +9,5 @@ json
 # Ignore auto generated files from root
 *.json
 *.png
+
+outputs
