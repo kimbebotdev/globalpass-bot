@@ -1,740 +1,588 @@
-import argparse
 import asyncio
 import json
-import os
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from playwright.async_api import Page, async_playwright
 
+import consolidator
 import config
+from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 
 load_dotenv()
 
-def read_input(path: str) -> Dict[str, Any]:
-    input_path = Path(path)
-    if not input_path.exists():
-        raise SystemExit(f"Input file not found: {input_path}")
-    data = json.loads(input_path.read_text())
-    # Required trips
-    trips = data.get("trips", [])
-    if not trips or not isinstance(trips, list):
-        raise SystemExit("Input must include a 'trips' array with at least one object.")
-    for idx, trip in enumerate(trips):
-        for key in ["origin", "destination"]:
-            if not trip.get(key):
-                raise SystemExit(f"Missing required field '{key}' in trips[{idx}] in {input_path}")
-    # Itinerary validation
-    flight_type = data.get("flight_type", "one-way").lower()
-    itinerary = data.get("itinerary", [])
-    if flight_type == "one-way":
-        if not itinerary or len(itinerary) < 1:
-            raise SystemExit("itinerary must contain at least one entry for one-way trips.")
-    elif flight_type == "round-trip":
-        if not itinerary or len(itinerary) < 2:
-            raise SystemExit("itinerary must contain two entries (departure, return) for round-trip.")
-    elif flight_type == "multiple-legs":
-        # Not implemented yet; allow but warn
-        print("Warning: multiple-legs not fully supported yet; using first itinerary leg only.")
-    else:
-        raise SystemExit(f"Unsupported flight_type '{flight_type}'. Use one-way, round-trip, or multiple-legs.")
-    return data
+AIRLINE_OUTPUT = Path("airlines.json")
+ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")
+AIRPORT_PICKER_OUTPUT = Path("airport_picker.json")
+
+app = FastAPI(title="Travel Automation Hub", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+OUTPUT_ROOT = Path("outputs")
+RUNS: Dict[str, "RunState"] = {}
+RUN_SEMAPHORE = asyncio.Semaphore(1)
 
 
-async def perform_login(context, headless: bool, screenshot: str | None):
-    username = os.getenv("UAL_USERNAME")
-    password = os.getenv("UAL_PASSWORD")
-    if not username or not password:
-        raise SystemExit("Set UAL_USERNAME and UAL_PASSWORD in your environment before running.")
+class RunState:
+    def __init__(self, run_id: str, output_dir: Path, input_data: Dict[str, Any]):
+        self.id = run_id
+        self.output_dir = output_dir
+        self.input_data = input_data
+        self.status = "pending"
+        self.error: str | None = None
+        self.created_at = datetime.utcnow()
+        self.completed_at: datetime | None = None
+        self.logs: list[Dict[str, Any]] = []
+        self.subscribers: dict[WebSocket, asyncio.Queue] = {}
+        self.done = asyncio.Event()
+        self.result_files: Dict[str, Path] = {}
 
-    page = await context.new_page()
-    await page.goto(config.LOGIN_URL, wait_until="domcontentloaded")
-    await page.fill("#username", username)
-    await page.fill("#password", password)
-    await page.click("input[type=submit][value='Login']")
+    def subscribe(self, ws: WebSocket) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self.subscribers[ws] = queue
+        return queue
 
+    def unsubscribe(self, ws: WebSocket) -> None:
+        self.subscribers.pop(ws, None)
+
+    async def _broadcast(self, payload: Dict[str, Any], store: bool = False) -> None:
+        if store:
+            self.logs.append(payload)
+        stale: list[WebSocket] = []
+        for ws, queue in self.subscribers.items():
+            try:
+                await queue.put(payload)
+            except RuntimeError:
+                stale.append(ws)
+        for ws in stale:
+            self.unsubscribe(ws)
+
+    async def log(self, message: str) -> None:
+        payload = {
+            "type": "log",
+            "ts": datetime.utcnow().isoformat(),
+            "message": message,
+        }
+        await self._broadcast(payload, store=True)
+
+    async def push_status(self) -> None:
+        payload = {
+            "type": "status",
+            "status": self.status,
+            "error": self.error,
+            "run_id": self.id,
+        }
+        if self.completed_at:
+            payload["completed_at"] = self.completed_at.isoformat()
+        await self._broadcast(payload, store=False)
+
+
+@contextmanager
+def patch_config(attr: str, value: Any):
+    previous = getattr(config, attr, None)
+    setattr(config, attr, value)
     try:
-        await page.wait_for_url(lambda url: "login" not in url, timeout=15000)
-    except PlaywrightTimeout:
-        pass
-
-    await page.wait_for_load_state("networkidle")
-    if screenshot:
-        await page.screenshot(path=screenshot, full_page=True)
-
-    return page
+        yield
+    finally:
+        setattr(config, attr, previous)
 
 
-async def type_and_select_autocomplete(page, selector: str, value: str) -> None:
-    field = page.locator(selector).first
-    await field.click()
-    await field.fill("")
-    await field.type(value, delay=50)
-    option = page.locator('[role="option"]', has_text=value).first
+def make_run_id() -> str:
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
+    output_path = state.output_dir / "myidtravel_flightschedule.json"
+    await state.log("[myidtravel] starting")
     try:
-        await option.wait_for(timeout=4000)
-        await option.click()
-    except PlaywrightTimeout:
-        await field.press("Enter")
+        with patch_config("FLIGHTSCHEDULE_OUTPUT", output_path):
+            await myidtravel_bot.run(
+                headless=not headed,
+                screenshot=None,
+                input_path=str(input_path),
+            )
+        if output_path.exists():
+            state.result_files["myidtravel"] = output_path
+            await state.log(f"[myidtravel] wrote results to {output_path}")
+        else:
+            await state.log("[myidtravel] finished but output file was not found")
+        return {"name": "myidtravel", "status": "ok", "output": str(output_path)}
+    except Exception as exc:
+        await state.log(f"[myidtravel] error: {exc}")
+        return {"name": "myidtravel", "status": "error", "error": str(exc)}
 
 
-async def type_and_select_in_container(container_or_field, selector: str, value: str) -> None:
-    """
-    Type/select into an autocomplete inside a container or directly into a provided field locator.
-    """
-    field = container_or_field
-    # If we were given a container (e.g., Page or Locator that is not the input), try to find the input inside.
+async def run_google_flights(state: RunState, input_path: Path, limit: int, headed: bool) -> Dict[str, Any]:
+    output_path = state.output_dir / "google_flights_results.json"
+    await state.log("[google_flights] starting")
     try:
-        is_input_like = hasattr(container_or_field, "fill") and hasattr(container_or_field, "press") and not hasattr(container_or_field, "goto")
-    except Exception:
-        is_input_like = False
-    if not is_input_like and hasattr(container_or_field, "locator"):
+        await google_flights_bot.run(
+            headless=not headed,
+            input_path=str(input_path),
+            output=output_path,
+            limit=limit,
+            screenshot=None,
+        )
+        state.result_files["google_flights"] = output_path
+        await state.log(f"[google_flights] wrote results to {output_path}")
+        return {"name": "google_flights", "status": "ok", "output": str(output_path)}
+    except Exception as exc:
+        await state.log(f"[google_flights] error: {exc}")
+        return {"name": "google_flights", "status": "error", "error": str(exc)}
+
+
+async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
+    output_path = state.output_dir / "stafftraveler_results.json"
+    storage_path = state.output_dir / "stafftraveler_auth_state.json"
+    await state.log("[stafftraveler] starting")
+    try:
+        with patch_config("STAFF_RESULTS_OUTPUT", output_path):
+            await stafftraveler_bot.perform_stafftraveller_login(
+                headless=not headed,
+                screenshot=None,
+                storage_path=str(storage_path),
+                input_data=myidtravel_bot.read_input(str(input_path)),
+            )
+        state.result_files["stafftraveler"] = output_path
+        await state.log(f"[stafftraveler] wrote results to {output_path}")
+        return {"name": "stafftraveler", "status": "ok", "output": str(output_path)}
+    except Exception as exc:
+        await state.log(f"[stafftraveler] error: {exc}")
+        return {"name": "stafftraveler", "status": "error", "error": str(exc)}
+
+
+async def execute_run(state: RunState, limit: int, headed: bool) -> None:
+    async with RUN_SEMAPHORE:
+        state.status = "running"
+        await state.push_status()
+        await state.log("Run started; launching three bots concurrently.")
+
+        input_path = state.output_dir / "input.json"
+        input_path.write_text(json.dumps(state.input_data, indent=2))
+
+        tasks = [
+            run_myidtravel(state, input_path, headed),
+            run_google_flights(state, input_path, limit, headed),
+            run_stafftraveler(state, input_path, headed),
+        ]
+        results = await asyncio.gather(*tasks)
+
+        had_error = any(res.get("status") == "error" for res in results)
+        consolidated = consolidator.consolidate(state.id, state.output_dir)
+        consolidated_path = state.output_dir / "consolidated.json"
+        excel_path = state.output_dir / "consolidated.xlsx"
+
+        consolidator.write_json(consolidated, consolidated_path)
         try:
-            field = container_or_field.locator(selector).first
+            consolidator.write_excel(consolidated, excel_path)
+        except Exception as exc:
+            await state.log(f"[consolidator] excel export failed: {exc}")
+
+        state.result_files["consolidated_json"] = consolidated_path
+        state.result_files["consolidated_excel"] = excel_path
+
+        state.status = "error" if had_error else "completed"
+        state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
+        state.completed_at = datetime.utcnow()
+        await state.log("Run finished." if not had_error else "Run finished with errors.")
+        await state.push_status()
+        state.done.set()
+
+
+async def _page_has_form(page: Page) -> bool:
+    selectors = [
+        "text=Find Flights",
+        'input[placeholder*="Origin" i]',
+        'input[placeholder*="Destination" i]',
+        "select",
+    ]
+    for sel in selectors:
+        try:
+            handle = page.locator(sel).first
+            if await handle.is_visible():
+                return True
         except Exception:
-            field = container_or_field
-    # Fallback by placeholder if nothing found.
-    try:
-        if not await field.count() and hasattr(container_or_field, "locator"):
-            field = container_or_field.locator(f'input[placeholder*="{value}" i]').first
-    except Exception:
-        pass
-    if not await field.count():
-        return
-    await field.click()
-    await field.fill("")
-    await field.type(value, delay=50)
-    page_obj = getattr(field, "page", None) or getattr(container_or_field, "page", None)
-    if not page_obj:
-        return
-    option = page_obj.locator('[role="option"]', has_text=value).first
-    try:
-        await option.wait_for(timeout=4000)
-        await option.click()
-    except PlaywrightTimeout:
-        await field.press("Enter")
-
-
-async def select_react_select(page, selector: str, value: str) -> None:
-    input_el = page.locator(selector).first
-    await input_el.click()
-    await input_el.fill("")
-    await input_el.type(value, delay=50)
-    option = page.locator('[role="option"]', has_text=value).first
-    try:
-        await option.wait_for(timeout=4000)
-        await option.click()
-    except PlaywrightTimeout:
-        await input_el.press("Enter")
-
-async def trigger_nonstop_flights(page, selector: str, value: str) -> None:
-    container = page.locator(selector).first
-    switch = container.locator(".switch-handle").first
-    is_active = switch.get_attribute("active")
-
-    if is_active:
-        await switch.click()
-
-async def select_flight_type(page, flight_type: str) -> None:
-    """Click the flight type tab based on input (one-way, round-trip, multiple-legs)."""
-    mapping = {
-        "one-way": "One Way",
-        "round-trip": "Round Trip",
-        "multiple-legs": "Multiple Legs",
-    }
-    label = mapping.get(flight_type.lower())
-    if not label:
-        return
-    tab = page.locator(f"{config.FLIGHT_TYPE} li", has_text=label).first
-    if await tab.count():
-        await tab.click()
-
-
-async def fill_text_input(page, selector: str, value: str, placeholder_hint: str | None = None) -> bool:
-    """
-    Fill a simple text input; returns True if something was filled.
-    Optionally uses a placeholder hint if the primary selector is missing.
-    """
-    field = page.locator(selector).first
-    if not await field.count() and placeholder_hint:
-        field = page.locator(f'input[placeholder*="{placeholder_hint}" i]').first
-    if await field.count():
-        await field.click()
-        await field.fill("")
-        await field.type(value)
-        await field.press("Enter")
-        return True
+            continue
     return False
 
 
-def _input_locator(container, field_id: str, name_val: str | None = None, placeholder_hint: str | None = None):
-    """
-    Build a locator that tries id, then name, then placeholder within a container.
-    """
-    parts = [f"input#{field_id}"]
-    if name_val:
-        parts.append(f"input[name='{name_val}']")
-    if placeholder_hint:
-        parts.append(f'input[placeholder*="{placeholder_hint}" i]')
-    selector = ", ".join(parts)
-    return container.locator(selector)
+async def _goto_home(page: Page, url_override: Optional[str] = None, extra_wait_ms: int = 0) -> str:
+    urls = [url_override] if url_override else config.BASE_URLS
+    last_error: Exception | None = None
+    tried: list[str] = []
 
+    async def _blocking_message() -> Optional[str]:
+        text_nodes = await page.locator("text=eligible for OA travel").all_text_contents()
+        if text_nodes:
+            return "User is not eligible for OA travel on this account/session."
+        return None
 
-async def _fill_input(locator, value: str) -> bool:
-    """
-    Try to fill a given locator, falling back to JS set if typing fails.
-    """
-    if not await locator.count():
-        return False
-    handle = locator.first
-    try:
-        await handle.scroll_into_view_if_needed()
-        await handle.click(force=True)
-    except Exception:
-        pass
-    try:
-        await handle.fill("")
-        await handle.type(value)
-        await handle.press("Enter")
-    except Exception:
-        pass
-    # If the value didn't stick, force-set via JS.
-    try:
-        current = await handle.input_value()
-        if current.strip() != value.strip():
-            await handle.evaluate(
-                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
-                value,
-            )
-    except Exception:
-        pass
-    return True
-
-
-async def _fill_time_input(handle, value: str) -> bool:
-    """
-    Fill a time input by clicking it and selecting from the dropdown menu.
-    Follows the same pattern as _fill_input but handles time dropdowns.
-    
-    Args:
-        locator: Playwright locator for the time input element
-        value: Time string in format "HH:MM" (e.g., "14:30", "09:00", "00:00")
-    
-    Returns:
-        bool: True if time was successfully selected, False otherwise
-    """
-    if not value:
-        return False
-    
-    if not await handle.count():
-        return False
-    
-    page_obj = getattr(handle, "page", None)
-    
-    if not page_obj:
-        print("Warning: No page object found for time input")
-        return False
-    
-    try:
-        # Parse the time value
-        parts = value.strip().split(":")
-        if len(parts) != 2:
-            print(f"Invalid time format: {value}. Expected HH:MM")
-            return False
-        
-        hour = parts[0].strip().lstrip("0") or "0"
-        minute = parts[1].strip().lstrip("0") or "0"
-        
-        # Format variations to try matching in dropdown
-        formats_to_try = [
-            f"{hour.zfill(2)} :{minute.zfill(2)}",  # "01 :30"
-            f"{hour.zfill(2)}:{minute.zfill(2)}",    # "01:30"
-            f"{hour} :{minute.zfill(2)}",            # "1 :30"
-            f"{hour}:{minute.zfill(2)}",              # "1:30"
-        ]
-        
-        # Click the input to open dropdown
+    for url in urls:
+        tried.append(url)
         try:
-            await handle.scroll_into_view_if_needed()
-            await handle.click()
-            await page_obj.wait_for_timeout(400)
-        except Exception:
-            try:
-                await handle.click(force=True)
-                await page_obj.wait_for_timeout(400)
-            except Exception as e:
-                print(f"Could not click time input: {e}")
-                return False
-        
-        # Wait for dropdown to appear
-        try:
-            await page_obj.wait_for_selector('div[role="menu"][id*="dropdown-menu"].show', timeout=2000, state="visible")
-        except Exception:
-            print("Dropdown menu did not appear")
-            # Try fallback: direct input
-            return await _fill_time_fallback(handle, value)
-        
-        # Find the dropdown menu - it should be visible now
-        dropdown = page_obj.locator('div[role="menu"][id*="dropdown-menu"].show').first
-        if not await dropdown.count() or not await dropdown.is_visible():
-            print("Dropdown menu not visible")
-            return await _fill_time_fallback(handle, value)
-        
-        # Find all menu items
-        menu_items = dropdown.locator('button[role="menuitem"]')
-        items_count = await menu_items.count()
-        
-        # Try to find matching time
-        selected = False
-        for format_str in formats_to_try:
-            if selected:
-                break
-                
-            for i in range(items_count):
-                try:
-                    item = menu_items.nth(i)
-                    item_text = (await item.inner_text()).strip()
-                    
-                    if item_text == format_str:
-                        try:
-                            await item.scroll_into_view_if_needed()
-                            await page_obj.wait_for_timeout(100)
-                            await item.click()
-                            await page_obj.wait_for_timeout(300)
-                            selected = True
-                            break
-                        except Exception:
-                            try:
-                                await item.click(force=True)
-                                await page_obj.wait_for_timeout(300)
-                                selected = True
-                                break
-                            except Exception:
-                                continue
-                except Exception:
-                    continue
-        
-        if not selected:
-            print(f"Could not find matching time option for: {value}")
-            return await _fill_time_fallback(handle, value)
-        
-        return True
-        
-    except Exception as e:
-        print(f"Error in _fill_time_input: {e}")
-        # Fallback to direct input
-        return await _fill_time_fallback(handle, value)
+            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            await page.wait_for_timeout(2000 + extra_wait_ms)
+            current_url = page.url
+            if "signon" in current_url:
+                raise RuntimeError("Redirected to signon.ual.com; auth_state.json may be expired.")
+            blocking = await _blocking_message()
+            if blocking:
+                raise RuntimeError(blocking)
+            if await _page_has_form(page):
+                return current_url
+            await page.wait_for_timeout(3000 + extra_wait_ms)
+            blocking = await _blocking_message()
+            if blocking:
+                raise RuntimeError(blocking)
+            if await _page_has_form(page):
+                return current_url
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Failed to load myIDTravel home page from {tried}. Last error: {last_error}")
 
 
-async def _fill_time_fallback(handle, value: str) -> bool:
-    """
-    Fallback method: directly set the time input value if dropdown fails.
-    """
-    try:
-        await handle.fill("")
-        await handle.type(value)
-        await handle.press("Enter")
-    except Exception:
-        pass
-    
-    # Force-set via JS if typing didn't work
-    try:
-        current = await handle.input_value()
-        if current.strip() != value.strip():
-            await handle.evaluate(
-                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
-                value,
-            )
-        return True
-    except Exception as e:
-        print(f"Fallback also failed: {e}")
-        return False
+async def _extract_airline_options(page: Page) -> List[Dict[str, Any]]:
+    airline_input = page.locator("#input-airline, input[aria-autocomplete='list'][role='combobox']")
+    if not await airline_input.count():
+        value_handle = page.locator("text=All Airlines").first
+        if await value_handle.is_visible():
+            await value_handle.click()
+        indicator = page.locator('[aria-haspopup="true"], .css-1xc3v61-indicatorContainer').first
+        if await indicator.is_visible():
+            await indicator.click()
 
+    if await airline_input.count():
+        await airline_input.first.click()
+        await airline_input.first.press("ArrowDown")
+        await page.wait_for_timeout(250)
 
-async def fill_leg_fields(container, date_val: str, time_val: str, class_val: str) -> None:
-    """
-    Fill date, time, and class fields within a specific container (for round-trip duplicate groups).
-    """
-    if date_val:
-        date_input = _input_locator(container, config.DATE_SELECTOR.lstrip("#"), placeholder_hint="Date")
-        await _fill_input(date_input, date_val)
-    if time_val:
-        time_input = _input_locator(container, config.TIME_SELECTOR.lstrip("#"), name_val="Time", placeholder_hint="Time")
-        await _fill_time_input(time_input, time_val)
-    if class_val:
-        class_input = _input_locator(container, config.CLASS_SELECTOR.lstrip("#"), name_val="Class", placeholder_hint="Class")
-        await _fill_input(class_input, class_val)
+        options = await page.evaluate(
+            """
+            async () => {
+                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                const menu = document.querySelector('[role="listbox"]') || document.querySelector('.css-5736gi-menu');
+                if (!menu) return [];
+                const scrollable = menu.querySelector('[style*="overflow: auto"]') || menu;
+                const seen = new Map();
 
+                const capture = () => {
+                    const opts = menu.querySelectorAll('[role="option"]');
+                    opts.forEach(opt => {
+                        const raw = (opt.textContent || '').trim();
+                        const codeEl = opt.querySelector('#airline-code-container');
+                        const code = codeEl ? (codeEl.textContent || '').trim() : null;
+                        const label = code ? raw.replace(code, '').trim() : raw;
+                        const value = opt.getAttribute('data-value') || opt.getAttribute('value') || code || label;
+                        const disabled = opt.getAttribute('aria-disabled') === 'true';
+                        const selected = opt.getAttribute('aria-selected') === 'true';
+                        const key = code || value || label;
+                        seen.set(key, { value: code || value || label, label, disabled, selected });
+                    });
+                };
 
-async def close_modal_if_present(page) -> None:
-    # Try a few common close buttons.
-    selectors = [
-        "[aria-label='Close']",
-        "button:has-text('Close')",
-        "button:has-text('close')",
-        ".modal [data-testid='close'], .modal .close",
-    ]
-    for sel in selectors:
-        btn = page.locator(sel).first
-        if await btn.count():
-            try:
-                await btn.click()
-                return
-            except Exception:
-                continue
+                const step = Math.max(40, Math.floor(scrollable.clientHeight * 0.6));
+                const totalHeight = scrollable.scrollHeight;
 
+                for (let pos = 0; pos <= totalHeight + step; pos += step) {
+                    scrollable.scrollTop = pos;
+                    scrollable.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    await sleep(60);
+                    capture();
+                }
+                for (let pos = totalHeight; pos >= 0; pos -= step) {
+                    scrollable.scrollTop = pos;
+                    scrollable.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    await sleep(60);
+                    capture();
+                }
+                scrollable.scrollTop = scrollable.scrollHeight;
+                scrollable.dispatchEvent(new Event('scroll', { bubbles: true }));
+                await sleep(120);
+                capture();
 
-async def apply_traveller_selection(page, travellers: list[dict]) -> None:
-    """Check/uncheck travellers in the modal based on input list and set salutation when provided."""
-    if not travellers:
-        return
-
-    # Wait briefly for modal to render.
-    await page.wait_for_timeout(500)
-    items = page.locator(config.TRAVELLER_ITEM_SELECTOR)
-    count = await items.count()
-    if count == 0:
-        await close_modal_if_present(page)
-        return
-
-    # Build a lookup of desired checks by lowercased name.
-    desired = {}
-    for trav in travellers:
-        name = (trav.get("name") or "").strip()
-        if not name:
-            continue
-        desired[name.lower()] = {
-            "checked": bool(trav.get("checked", False)),
-            "salutation": (trav.get("salutation") or "").strip().upper(),
-        }
-
-    for idx in range(count):
-        item = items.nth(idx)
-        name_text = (await item.locator(config.TRAVELLER_NAME_SELECTOR).inner_text()).strip()
-        name_key = name_text.lower()
-
-        if name_key not in desired:
-            continue
-
-        desired_state = desired[name_key]
-        should_check = desired_state["checked"]
-        checkbox = item.locator(config.TRAVELLER_CHECKBOX_SELECTOR).first
-
-        if not await checkbox.count():
-            continue
-
-        try:
-            checked = await checkbox.is_checked()
-        except Exception:
-            checked = False
-
-        if should_check and not checked:
-            await checkbox.check(force=True)
-        elif not should_check and checked:
-            await checkbox.uncheck(force=True)
-
-        # Apply salutation if provided (MR/MS) using the dropdown sibling to this traveller item.
-        salutation = desired_state.get("salutation")
-        if salutation in {"MR", "MS"}:
-            parent = item.locator("xpath=..")
-            dropdowns = parent.locator(config.TRAVELLER_SALUTATION_TOGGLE)
-            dropdown = dropdowns.nth(idx) if await dropdowns.count() > idx else dropdowns.first
-            if not await dropdown.count():
-                dropdown = page.locator(config.TRAVELLER_SALUTATION_TOGGLE).nth(idx) if await page.locator(config.TRAVELLER_SALUTATION_TOGGLE).count() > idx else page.locator(config.TRAVELLER_SALUTATION_TOGGLE).first
-            if await dropdown.count():
-                try:
-                    await dropdown.click()
-                    await page.wait_for_timeout(150)
-                    # Scope menu to the same parent block when possible.
-                    menu = parent.locator(".styles_LabelWithDropdown_DropdownMenu__UXOnK.dropdown-menu.show").first
-                    if not await menu.count():
-                        menus = page.locator(".styles_LabelWithDropdown_DropdownMenu__UXOnK.dropdown-menu.show")
-                        menu = menus.last
-                    option = menu.locator("button.dropdown-item", has_text=salutation).first
-                    if await option.count():
-                        await option.click()
-                except Exception:
-                    # Ignore salutation failures and continue.
-                    pass
-
-        await page.wait_for_timeout(500)
-
-async def add_travel_partners(page, partners: list[dict]) -> None:
-    """Add travel partners using the modal form."""
-    if not partners:
-        return
-
-    add_btn = page.locator(config.ADD_TRAVEL_PARTNER).first
-    if not await add_btn.count():
-        return
-
-    for idx, partner in enumerate(partners):
-        try:
-            await add_btn.click()
-            await page.wait_for_timeout(300)
-        except Exception:
-            continue
-
-        containers = page.locator("div.travellerDiv")
-        count = await containers.count()
-        container = containers.nth(count - 1) if count else page
-
-        # Type: Adult/Child
-        p_type = (partner.get("type") or "").strip()
-        if p_type:
-            type_sel = container.locator("select#type")
-            if await type_sel.count():
-                try:
-                    await type_sel.select_option(label=p_type)
-                except Exception:
-                    await type_sel.select_option(value=p_type)
-
-        # Salutation (Adult only) or DOB (Child)
-        sal = (partner.get("salutations") or partner.get("salutation") or "").strip()
-        dob = (partner.get("dob") or "").strip()
-        if p_type.lower() == "child":
-            if dob:
-                dob_input = container.locator("input#date-picker")
-                if await dob_input.count():
-                    await dob_input.click()
-                    await dob_input.fill("")
-                    await dob_input.type(dob)
-                    await dob_input.press("Enter")
-        else:
-            if sal:
-                sal_sel = container.locator("select#salutations")
-                if await sal_sel.count():
-                    try:
-                        await sal_sel.select_option(label=sal)
-                    except Exception:
-                        await sal_sel.select_option(value=sal)
-
-        first_name = (partner.get("first_name") or "").strip()
-        if first_name:
-            name_input = container.locator("input#name")
-            if await name_input.count():
-                await name_input.fill(first_name)
-
-        last_name = (partner.get("last_name") or "").strip()
-        if last_name:
-            last_input = container.locator("input#lastName")
-            if await last_input.count():
-                await last_input.fill(last_name)
-
-        add_partner_btn = container.locator(config.TRAVEL_PARTNER_ADD).first
-        if not await add_partner_btn.count():
-            add_partner_btn = page.locator(config.TRAVEL_PARTNER_ADD).first
-        if await add_partner_btn.count():
-            try:
-                await add_partner_btn.click()
-            except Exception:
-                pass
-
-        await page.wait_for_timeout(300)
-
-
-async def fill_multiple_legs(page, trips: list[dict], itinerary: list[dict]) -> None:
-    """
-    Fill multiple legs using trips (origin/destination) and itinerary (date/time/class).
-    Clicks Add Flight to create additional leg sections if needed.
-    """
-    if not trips:
-        return
-
-    add_btn = page.locator(config.ADD_FLIGHT_BUTTON).first
-
-    airline_containers = page.locator(config.AIRLINE_REASON_CONTAINER)
-    leg_containers = page.locator(config.LEG_SELECTOR)
-    origin_inputs = page.locator(config.ORIGIN_SELECTOR)
-    dest_inputs = page.locator(config.DEST_SELECTOR)
-
-    for idx, trip in enumerate(trips):
-        # Ensure containers exist for this leg; if not, click Add Flight and refresh.
-        while True:
-            air_count = await airline_containers.count()
-            leg_count = await leg_containers.count()
-            if air_count > idx and leg_count > idx:
-                break
-            if not await add_btn.count():
-                break
-            try:
-                await add_btn.scroll_into_view_if_needed()
-                await add_btn.click()
-                await page.wait_for_timeout(600)
-            except Exception:
-                break
-            airline_containers = page.locator(config.AIRLINE_REASON_CONTAINER)
-            leg_containers = page.locator(config.LEG_SELECTOR)
-            origin_inputs = page.locator(config.ORIGIN_SELECTOR)
-            dest_inputs = page.locator(config.DEST_SELECTOR)
-
-        origin = trip.get("origin", "")
-        dest = trip.get("destination", "")
-        if origin:
-            origin_field = origin_inputs.nth(idx) if await origin_inputs.count() > idx else page.locator(config.ORIGIN_SELECTOR).first
-            await type_and_select_in_container(origin_field, config.ORIGIN_SELECTOR, origin)
-        if dest:
-            dest_field = dest_inputs.nth(idx) if await dest_inputs.count() > idx else page.locator(config.DEST_SELECTOR).first
-            await type_and_select_in_container(dest_field, config.DEST_SELECTOR, dest)
-
-        leg_data = itinerary[idx] if idx < len(itinerary) else {}
-        leg_container = leg_containers.nth(idx) if await leg_containers.count() > idx else page
-        await fill_leg_fields(
-            leg_container,
-            leg_data.get("date", ""),
-            leg_data.get("time", ""),
-            leg_data.get("class", ""),
+                return Array.from(seen.values());
+            }
+            """
         )
+        if options:
+            return options
 
-async def click_traveller_continue(page) -> None:
-    """Click the traveller modal continue button if present."""
-    continue_button = page.locator(config.TRAVELLER_CONTINUE_BUTTON).first
-    if await continue_button.count():
+    raise RuntimeError("Airline dropdown not found. Is the page layout different?")
+
+
+async def _capture_origin_lookup(page: Page, query: str) -> List[Dict[str, Any]]:
+    captured: List[Dict[str, Any]] = []
+    keywords = ("airport", "origin", "destination", "lookup", "suggest")
+
+    async def handle_response(response) -> None:
         try:
-            await continue_button.scroll_into_view_if_needed()
-            await continue_button.click(force=True)
-            await page.wait_for_timeout(500)
-        except Exception:
-            pass
-
-
-async def submit_form_and_capture(page, output_path: Path) -> None:
-    loop = asyncio.get_event_loop()
-    flightschedule_future: asyncio.Future = loop.create_future()
-
-    def handle_response(resp):
-        try:
-            if resp.request.method.lower() == "post" and "flightschedule" in resp.url.lower():
-                if not flightschedule_future.done():
-                    flightschedule_future.set_result(resp)
+            if response.request.resource_type not in {"xhr", "fetch"}:
+                return
+            url_lower = response.url.lower()
+            if not any(k in url_lower for k in keywords):
+                return
+            try:
+                body = await response.json()
+            except Exception:
+                body = await response.text()
+            captured.append(
+                {
+                    "url": response.url,
+                    "status": response.status,
+                    "headers": dict(response.headers),
+                    "body": body,
+                }
+            )
         except Exception:
             return
 
-    page.on("response", handle_response)
+    page.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
 
-    submit_btn = page.locator(config.SUBMIT_SELECTOR).first
-    await submit_btn.click()
+    origin_input = page.locator('input[placeholder*="Origin" i]').first
+    await origin_input.click()
+    await origin_input.fill("")
+    await origin_input.type(query, delay=60)
+    await page.wait_for_timeout(2500)
 
+    if captured:
+        ORIGIN_LOOKUP_OUTPUT.write_text(json.dumps(captured, indent=2))
+    return captured
+
+
+async def _get_csrf_token(context) -> Optional[str]:
     try:
-        response = await asyncio.wait_for(flightschedule_future, timeout=20000)
-        try:
-            data = await response.json()
-        except Exception:
-            data = await response.text()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
-        print(f"Saved flightschedule response to {output_path}")
-    except asyncio.TimeoutError:
-        print("Timed out waiting for flightschedule response; no JSON saved.")
-    except Exception as exc:
-        print(f"Error capturing flightschedule response: {exc}")
+        cookies = await context.cookies()
+        for c in cookies:
+            if c.get("name", "").lower() in {"csrf", "xsrf-token", "x-csrf-token"}:
+                return c.get("value")
+    except Exception:
+        pass
+    return None
 
 
-async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
-    print("Successful login")
+async def _fetch_airport_picker(
+    page: Page,
+    context,
+    term: str,
+    url_base: str,
+    page_num: int = 1,
+    limit: int = 25,
+    csrf_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    csrf_token = csrf_override or await _get_csrf_token(context)
+    if not csrf_token:
+        raise RuntimeError("Could not find CSRF token. Provide one via request body or refresh auth.")
 
-    # Click "New Flight" first, then close modal if it appears.
-    new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first
-    if await new_flight_btn.count():
-        await new_flight_btn.click()
-        await page.wait_for_timeout(3000)
+    endpoint = url_base.rstrip("/") + "/json/general/airportPicker"
+    payload = {
+        "term": term,
+        "page": page_num,
+        "start": 0 if page_num <= 1 else (page_num - 1) * limit,
+        "limit": limit,
+        "csrf": csrf_token,
+    }
 
-    travellers = input_data.get("traveller", [])
-    await apply_traveller_selection(page, travellers)
-    travel_partners = input_data.get("travel_partner", [])
-    await add_travel_partners(page, travel_partners)
-    await click_traveller_continue(page)
-    await close_modal_if_present(page)
-
-    # Select flight type tab
-    flight_type = input_data.get("flight_type", "one-way").lower()
-    await select_flight_type(page, flight_type)
-
-    only_nonstop_flights = input_data.get("nonstop_flights", "")
-    if only_nonstop_flights:
-        await trigger_nonstop_flights(page, config.NONSTOP_FLIGHTS_CONTAINER, only_nonstop_flights)
-
-    airline = input_data.get("airline", "")
-    if airline:
-        await select_react_select(page, config.AIRLINE_SELECTOR, airline)
-
-    travel_status = input_data.get("travel_status", "")
-    if travel_status:
-        await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status)
-
-    trips = input_data.get("trips", [])
-    trip0 = trips[0] if trips else {}
-
-    itinerary = input_data.get("itinerary", [])
-    if flight_type == "multiple-legs":
-        await fill_multiple_legs(page, trips, itinerary)
-    else:
-        departure_leg = itinerary[0] if itinerary else {}
-        return_leg = itinerary[1] if flight_type == "round-trip" and len(itinerary) > 1 else None
-
-        await type_and_select_autocomplete(page, config.ORIGIN_SELECTOR, trip0.get("origin", ""))
-        await type_and_select_autocomplete(page, config.DEST_SELECTOR, trip0.get("destination", ""))
-
-        # Containers for date/time/class groups (one per leg for round-trip).
-        leg_containers = page.locator(config.LEG_SELECTOR)
-        # Departure leg
-        if departure_leg:
-            container = leg_containers.nth(0) if await leg_containers.count() else page
-            await fill_leg_fields(
-                container,
-                departure_leg.get("date", ""),
-                departure_leg.get("time", ""),
-                departure_leg.get("class", ""),
-            )
-
-        # Return leg (round-trip) uses second container if present, otherwise falls back to page.
-        if return_leg:
-            container = leg_containers.nth(1) if await leg_containers.count() > 1 else page
-            await fill_leg_fields(
-                container,
-                return_leg.get("date", ""),
-                return_leg.get("time", ""),
-                return_leg.get("class", ""),
-            )
-
-    await page.wait_for_timeout(500)
-
-    # Save under a consistent flightschedule filename (independent of flight_type input).
-    output_path = config.FLIGHTSCHEDULE_OUTPUT
-    await submit_form_and_capture(page, output_path)
-
-    await page.wait_for_timeout(1000)
+    resp = await page.request.post(endpoint, data=payload)
+    if not resp.ok:
+        raise RuntimeError(f"airportPicker request failed {resp.status}: {await resp.text()}")
+    data = await resp.json()
+    AIRPORT_PICKER_OUTPUT.write_text(json.dumps(data, indent=2))
+    return data
 
 
-async def run(headless: bool, screenshot: str | None, input_path: str) -> None:
-    input_data = read_input(input_path)
+async def scrape_airlines_task(
+    headless: bool = True,
+    sample_origin_query: Optional[str] = None,
+    url_override: Optional[str] = None,
+    extra_wait_ms: int = 0,
+    airport_term: Optional[str] = None,
+    csrf_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    storage_file = Path("auth_state.json")
+    if not storage_file.exists():
+        raise RuntimeError("auth_state.json not found. Run the myIDTravel bot first to create it.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
+        context = await browser.new_context(storage_state=str(storage_file))
+        page = await context.new_page()
 
-        page = await perform_login(context, headless=headless, screenshot=screenshot)
-        await context.storage_state(path="auth_state.json")
+        home_url = await _goto_home(page, url_override=url_override, extra_wait_ms=extra_wait_ms)
 
-        await fill_form_from_input(page, input_data)
+        airlines = await _extract_airline_options(page)
+        AIRLINE_OUTPUT.write_text(json.dumps(airlines, indent=2))
 
+        airport_picker_payload = None
+        if airport_term:
+            airport_picker_payload = await _fetch_airport_picker(
+                page=page,
+                context=context,
+                term=airport_term,
+                url_base=home_url,
+                csrf_override=csrf_override,
+            )
+
+        origin_lookup_payload = None
+        if sample_origin_query:
+            origin_lookup_payload = await _capture_origin_lookup(page, sample_origin_query)
+
+        await context.close()
         await browser.close()
 
+    return {
+        "home_url": home_url,
+        "airlines_count": len(airlines),
+        "airlines_path": str(AIRLINE_OUTPUT),
+        "airport_picker_path": str(AIRPORT_PICKER_OUTPUT) if airport_picker_payload else None,
+        "origin_lookup_path": str(ORIGIN_LOOKUP_OUTPUT) if origin_lookup_payload else None,
+    }
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Login and fill flight form using input.json values.")
-    parser.add_argument("--headed", action="store_true", help="Run browser in headed mode.")
-    parser.add_argument("--screenshot", default="", help="Optional path to save login screenshot.")
-    parser.add_argument("--input", default="input.json", help="Path to input JSON file.")
-    return parser.parse_args()
+
+@app.websocket("/ws/{run_id}")
+async def logs_ws(websocket: WebSocket, run_id: str):
+    state = RUNS.get(run_id)
+    if not state:
+        await websocket.close(code=4000)
+        return
+
+    await websocket.accept()
+    queue = state.subscribe(websocket)
+
+    # Send existing logs to new subscribers.
+    for log in state.logs:
+        await websocket.send_json(log)
+    await websocket.send_json({"type": "status", "status": state.status, "run_id": state.id})
+
+    try:
+        while True:
+            payload = await queue.get()
+            await websocket.send_json(payload)
+            if payload.get("type") == "status" and payload.get("status") in {"completed", "error"}:
+                break
+    except WebSocketDisconnect:
+        state.unsubscribe(websocket)
 
 
-async def main() -> None:
-    args = parse_args()
-    screenshot = args.screenshot or None
-    await run(headless=not args.headed, screenshot=screenshot, input_path=args.input)
+@app.post("/api/run")
+async def start_run(payload: Dict[str, Any] = Body(...)):
+    input_data = payload.get("input") if isinstance(payload, dict) else None
+    if not input_data:
+        input_data = payload
+
+    if not isinstance(input_data, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
+    limit = payload.get("limit") if isinstance(payload, dict) else None
+    limit = int(limit) if isinstance(limit, int) or (isinstance(limit, str) and limit.isdigit()) else 30
+    headed = bool(payload.get("headed")) if isinstance(payload, dict) else False
+
+    run_id = make_run_id()
+    run_dir = OUTPUT_ROOT / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    state = RunState(run_id, run_dir, input_data)
+    RUNS[run_id] = state
+
+    asyncio.create_task(execute_run(state, limit=limit, headed=headed))
+    return {"run_id": run_id, "status": state.status, "output_dir": str(run_dir)}
+
+
+@app.get("/api/runs/{run_id}")
+async def run_details(run_id: str):
+    state = RUNS.get(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    consolidated = consolidator.consolidate(run_id, state.output_dir)
+    return {
+        "run_id": run_id,
+        "status": state.status,
+        "error": state.error,
+        "created_at": state.created_at.isoformat(),
+        "completed_at": state.completed_at.isoformat() if state.completed_at else None,
+        "output_dir": str(state.output_dir),
+        "consolidated": consolidated,
+        "files": {k: str(v) for k, v in state.result_files.items() if v.exists()},
+    }
+
+
+@app.get("/api/runs/{run_id}/download/{kind}")
+async def download(run_id: str, kind: str):
+    run_dir = OUTPUT_ROOT / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+    if kind == "json":
+        path = run_dir / "consolidated.json"
+        if not path.exists():
+            consolidator.write_json(consolidator.consolidate(run_id, run_dir), path)
+        return FileResponse(path, filename=f"{run_id}.json")
+
+    if kind == "excel":
+        path = run_dir / "consolidated.xlsx"
+        if not path.exists():
+            consolidator.write_excel(consolidator.consolidate(run_id, run_dir), path)
+        return FileResponse(path, filename=f"{run_id}.xlsx")
+
+    if kind in consolidator.BOT_OUTPUTS:
+        bot_path = run_dir / consolidator.BOT_OUTPUTS[kind]
+        if bot_path.exists():
+            return FileResponse(bot_path, filename=bot_path.name)
+        raise HTTPException(status_code=404, detail=f"No output found for {kind}")
+
+    raise HTTPException(status_code=400, detail="Unsupported download format.")
+
+
+@app.post("/api/scrape-airlines")
+async def scrape_airlines_api(payload: Dict[str, Any] = Body(default={})):
+    """
+    Run the airline dropdown scraper using existing auth_state.json.
+    """
+    try:
+        result = await scrape_airlines_task(
+            headless=not bool(payload.get("headed")),
+            sample_origin_query=payload.get("origin_query"),
+            url_override=payload.get("url"),
+            extra_wait_ms=int(payload.get("extra_wait_ms") or 0),
+            airport_term=payload.get("airport_term"),
+            csrf_override=payload.get("csrf"),
+        )
+        return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    index_path = Path("index.html")
+    if index_path.exists():
+        return HTMLResponse(index_path.read_text())
+    return HTMLResponse("<h1>Travel Automation Hub</h1><p>UI not found.</p>")
+
+
+@app.get("/airlines.json")
+async def airlines():
+    path = Path("airlines.json")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="airlines.json not found")
+    return FileResponse(path)
+
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
