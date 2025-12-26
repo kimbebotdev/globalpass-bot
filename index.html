@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Travel Automation Hub</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <h1>Travel Automation Hub</h1>
+        <div class="meta">
+          <!-- <span class="chip">FastAPI backend</span>
+          <span class="chip">Playwright bots</span>
+          <span>Unified run: myIDTravel · Google Flights · StaffTraveler</span> -->
+        </div>
+      </div>
+      <div class="meta">
+        <!-- <span class="badge">REST + WebSocket</span> -->
+        <!-- <span class="badge">JSON / Excel exports</span> -->
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="status-row">
+          <h3>Input</h3>
+          <span class="pill pending" id="status-pill">idle</span>
+          <span class="badge" id="run-id"></span>
+        </div>
+        <form id="run-form">
+          <div class="field-grid">
+            <label>flight_type
+              <select id="flight_type">
+                <option value="one-way">One-way</option>
+                <option value="round-trip">Round trip</option>
+                <option value="multiple-legs">Multiple legs / Multi-city</option>
+              </select>
+            </label>
+            <label>travel_status
+              <select id="travel_status">
+                <option value="R2 Standby">R2 Standby</option>
+                <option value="Bookable">Bookable</option>
+              </select>
+            </label>
+            <label>airline
+              <select id="airline">
+                <option value="">Loading...</option>
+              </select>
+            </label>
+            <label style="flex-direction: row; align-items: center; gap: 10px; padding-top: 8px;">
+              <input id="nonstop_flights" type="checkbox" style="width: 18px;"> Non-stop only
+            </label>
+            <label style="flex-direction: row; align-items: center; gap: 10px; padding-top: 8px;">
+              <input id="headed" type="checkbox" style="width: 18px;"> Show browsers (headed)
+            </label>
+          </div>
+
+          <div class="leg-header">
+            <div>
+              <div class="leg-title">Trips & Itinerary</div>
+              <div class="leg-subtitle">Add legs based on flight_type (one-way: 1 leg, round-trip: 2 legs, multi-city:
+                many)</div>
+            </div>
+            <button class="ghost" type="button" id="add-flight">Add flight</button>
+          </div>
+          <div id="legs-container" class="legs"></div>
+
+          <label>Raw JSON (optional — overrides the form)
+            <textarea id="raw-json" placeholder='Paste or drop input.json here'></textarea>
+          </label>
+          <div class="actions">
+            <input type="file" id="file-input" accept=".json" hidden>
+            <button class="ghost" type="button" id="load-file">Import input.json</button>
+            <button class="ghost" type="button" id="load-sample">Load sample</button>
+            <div style="flex:1"></div>
+            <button class="primary" type="submit" id="run-btn">Run all bots</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="status-row">
+          <h3>Live logs</h3>
+          <span class="badge" id="status-label">waiting</span>
+        </div>
+        <div class="log-feed" id="log-feed"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="status-row">
+        <h3>Results</h3>
+        <span class="badge">Download</span>
+        <div class="actions">
+          <button class="ghost" type="button" id="download-json" disabled>JSON</button>
+          <button class="ghost" type="button" id="download-xlsx" disabled>Excel</button>
+        </div>
+      </div>
+      <div class="file-row" id="file-list"></div>
+      <div class="results" id="results-block">Awaiting a run.</div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>
