@@ -1,10 +1,12 @@
 import asyncio
 import json
+import shutil
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import asyncio.subprocess
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +14,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import Page, async_playwright
 
-import consolidator
 import config
 from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 
@@ -21,8 +22,15 @@ load_dotenv()
 AIRLINE_OUTPUT = Path("airlines.json")
 ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")
 AIRPORT_PICKER_OUTPUT = Path("airport_picker.json")
+BOT_OUTPUTS = {
+    "myidtravel": "myidtravel_flightschedule.json",
+    "google_flights": "google_flights_results.json",
+    "stafftraveler": "stafftraveller_results.json",
+}
+REPORT_JSON = "standby_report_multi.json"
+REPORT_XLSX = "standby_report_multi.xlsx"
 
-app = FastAPI(title="Travel Automation Hub", version="0.1.0")
+app = FastAPI(title="Globalpass Bot", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -103,6 +111,29 @@ def make_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 
+def normalize_google_time(time_str: str) -> Optional[str]:
+    """Converts 12h time (Google) to 24h 'HH:MM' for matching."""
+    try:
+        time_str = time_str.replace('\u202f', ' ').strip()
+        return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
+    except:
+        return None
+    
+
+def to_minutes(duration_str: str) -> int:
+    """Converts duration strings like '7h 25m' to total minutes."""
+    if not duration_str:
+        return 1440
+    try:
+        clean = duration_str.lower().replace('hr', 'h').replace('min', 'm').replace(' ', '')
+        h = int(clean.split('h')[0]) if 'h' in clean else 0
+        m_part = clean.split('h')[-1] if 'h' in clean else clean
+        m = int(m_part.replace('m', '')) if 'm' in m_part else 0
+        return h * 60 + m
+    except:
+        return 1440
+
+
 async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
     output_path = state.output_dir / "myidtravel_flightschedule.json"
     await state.log("[myidtravel] starting")
@@ -144,7 +175,7 @@ async def run_google_flights(state: RunState, input_path: Path, limit: int, head
 
 
 async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
-    output_path = state.output_dir / "stafftraveler_results.json"
+    output_path = state.output_dir / "stafftraveller_results.json"
     storage_path = state.output_dir / "stafftraveler_auth_state.json"
     await state.log("[stafftraveler] starting")
     try:
@@ -180,18 +211,9 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         results = await asyncio.gather(*tasks)
 
         had_error = any(res.get("status") == "error" for res in results)
-        consolidated = consolidator.consolidate(state.id, state.output_dir)
-        consolidated_path = state.output_dir / "consolidated.json"
-        excel_path = state.output_dir / "consolidated.xlsx"
-
-        consolidator.write_json(consolidated, consolidated_path)
-        try:
-            consolidator.write_excel(consolidated, excel_path)
-        except Exception as exc:
-            await state.log(f"[consolidator] excel export failed: {exc}")
-
-        state.result_files["consolidated_json"] = consolidated_path
-        state.result_files["consolidated_excel"] = excel_path
+        # await _mirror_legacy_outputs(state)
+        # Generate flight loads report directly from mirrored legacy outputs
+        await _run_generate_flight_loads(state)
 
         state.status = "error" if had_error else "completed"
         state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
@@ -449,6 +471,146 @@ async def scrape_airlines_task(
         "origin_lookup_path": str(ORIGIN_LOOKUP_OUTPUT) if origin_lookup_payload else None,
     }
 
+async def _run_generate_flight_loads(state: RunState) -> None:
+    """
+    Generate standby_report_multi.* using the three bot outputs.
+    This is the migrated logic from generate-flight-loads.py.
+    """
+    await state.log("[report] Starting flight loads report generation...")
+    
+    try:
+        # Load all sources directly from run directory
+        myid_path = state.result_files.get("myidtravel")
+        google_path = state.result_files.get("google_flights")
+        staff_path = state.result_files.get("stafftraveler")
+        
+        if not all([myid_path, google_path, staff_path]):
+            await state.log("[report] Missing required input files, skipping report generation")
+            return
+        
+        # Load JSON data
+        with open(myid_path, 'r') as f:
+            myid_data = json.load(f)
+        with open(google_path, 'r') as f:
+            google_data = json.load(f)
+        with open(staff_path, 'r') as f:
+            staff_data = json.load(f)
+        
+        await state.log("[report] Loaded all input files successfully")
+        
+        # Pre-process external sources for matching
+        staff_map = {
+            d['airline_flight_number']: d.get('aircraft', 'N/A')
+            for entry in staff_data
+            for d in entry.get('flight_details', [])
+        }
+        
+        google_map = {}
+        for entry in google_data:
+            for ftype in ['top_flights', 'other_flights']:
+                for g_f in entry.get('flights', {}).get(ftype, []):
+                    norm_time = normalize_google_time(g_f.get('depart_time', ''))
+                    if norm_time:
+                        google_map[(g_f['airline'], norm_time)] = True
+        
+        chance_weights = {"HIGH": 100, "MID": 50, "LOW": 10}
+        eligible_flights = []
+        
+        # Filter and score selectable flights
+        for routing in myid_data.get('routings', []):
+            for flight in routing.get('flights', []):
+                if flight.get('selectable') is not True:
+                    continue
+                
+                seg = flight['segments'][0]
+                f_num = seg['flightNumber']
+                airline = seg['operatingAirline']['name']
+                dep_time = seg['departureTime']
+                
+                # Source detection
+                in_staff = f_num in staff_map
+                in_google = (airline, dep_time) in google_map
+                sources = ["MyIDTravel.com"]
+                if in_google:
+                    sources.append("Google Flights")
+                if in_staff:
+                    sources.append("Stafftraveler")
+                
+                # Scoring logic
+                dur_min = to_minutes(flight.get('duration', '0h 0m'))
+                score = chance_weights.get(flight.get('chance', 'LOW'), 0)
+                score += 20 if len(flight.get('segments', [])) == 1 else 0  # Nonstop bonus
+                score += max(0, (720 - dur_min) / 10)  # Duration bonus
+                
+                eligible_flights.append({
+                    "Flight": f_num,
+                    "Airline": airline,
+                    "Aircraft": staff_map.get(f_num, "N/A"),
+                    "Departure": dep_time,
+                    "Arrival": seg['arrivalTime'],
+                    "Duration": flight.get('duration'),
+                    "Chance": flight.get('chance'),
+                    "Source": ", ".join(sources),
+                    "Score": round(score, 2),
+                    "In_Staff": in_staff,
+                    "In_Google": in_google
+                })
+        
+        await state.log(f"[report] Processed {len(eligible_flights)} eligible flights")
+        
+        # Ranking helper function
+        def get_top_5(subset):
+            ranked = sorted(subset, key=lambda x: x['Score'], reverse=True)
+            final = []
+            for i, item in enumerate(ranked[:5], 1):
+                clean = {"Rank": i}
+                clean.update({k: v for k, v in item.items() if not k.startswith("In_")})
+                final.append(clean)
+            return final
+        
+        # Generate output lists
+        results = {
+            "Top_5_Overall": get_top_5(eligible_flights),
+            "Top_5_MyIDTravel": get_top_5(eligible_flights),
+            "Top_5_Stafftraveler": get_top_5([f for f in eligible_flights if f['In_Staff']]),
+            "Top_5_Google_Flights": get_top_5([f for f in eligible_flights if f['In_Google']])
+        }
+        
+        # Save to run directory
+        json_output = state.output_dir / "standby_report_multi.json"
+        excel_output = state.output_dir / "standby_report_multi.xlsx"
+        
+        with open(json_output, 'w') as f:
+            json.dump(results, f, indent=4)
+        
+        state.result_files["standby_report_multi.json"] = json_output
+        await state.log(f"[report] Generated {json_output}")
+        
+        # Generate Excel output
+        try:
+            import pandas as pd
+            with pd.ExcelWriter(excel_output) as writer:
+                pd.DataFrame(results["Top_5_Overall"]).to_excel(writer, sheet_name='Top 5 Overall', index=False)
+                pd.DataFrame(results["Top_5_MyIDTravel"]).to_excel(writer, sheet_name='MyIDTravel', index=False)
+                pd.DataFrame(results["Top_5_Stafftraveler"]).to_excel(writer, sheet_name='Stafftraveler', index=False)
+                pd.DataFrame(results["Top_5_Google_Flights"]).to_excel(writer, sheet_name='Google Flights', index=False)
+            
+            state.result_files["standby_report_multi.xlsx"] = excel_output
+            await state.log(f"[report] Generated {excel_output}")
+        except ImportError:
+            await state.log("[report] pandas not available, skipping Excel generation")
+        except Exception as exc:
+            await state.log(f"[report] Excel generation failed: {exc}")
+        
+        await state.log("[report] Flight loads report generation completed successfully")
+        
+    except FileNotFoundError as exc:
+        await state.log(f"[report] Required JSON files not found: {exc}")
+    except json.JSONDecodeError as exc:
+        await state.log(f"[report] JSON parsing error: {exc}")
+    except Exception as exc:
+        await state.log(f"[report] Error generating report: {exc}")
+
 
 @app.websocket("/ws/{run_id}")
 async def logs_ws(websocket: WebSocket, run_id: str):
@@ -504,7 +666,13 @@ async def run_details(run_id: str):
     state = RUNS.get(run_id)
     if not state:
         raise HTTPException(status_code=404, detail="Run not found.")
-    consolidated = consolidator.consolidate(run_id, state.output_dir)
+    report_path = state.output_dir / REPORT_JSON
+    report_data = {}
+    if report_path.exists():
+        try:
+            report_data = json.loads(report_path.read_text())
+        except Exception:
+            report_data = {}
     return {
         "run_id": run_id,
         "status": state.status,
@@ -512,7 +680,7 @@ async def run_details(run_id: str):
         "created_at": state.created_at.isoformat(),
         "completed_at": state.completed_at.isoformat() if state.completed_at else None,
         "output_dir": str(state.output_dir),
-        "consolidated": consolidated,
+        "report": report_data,
         "files": {k: str(v) for k, v in state.result_files.items() if v.exists()},
     }
 
@@ -524,19 +692,19 @@ async def download(run_id: str, kind: str):
         raise HTTPException(status_code=404, detail="Run not found.")
 
     if kind == "json":
-        path = run_dir / "consolidated.json"
+        path = run_dir / REPORT_JSON
         if not path.exists():
-            consolidator.write_json(consolidator.consolidate(run_id, run_dir), path)
-        return FileResponse(path, filename=f"{run_id}.json")
+            raise HTTPException(status_code=404, detail="Report JSON not found.")
+        return FileResponse(path, filename=path.name)
 
     if kind == "excel":
-        path = run_dir / "consolidated.xlsx"
+        path = run_dir / REPORT_XLSX
         if not path.exists():
-            consolidator.write_excel(consolidator.consolidate(run_id, run_dir), path)
-        return FileResponse(path, filename=f"{run_id}.xlsx")
+            raise HTTPException(status_code=404, detail="Report Excel not found.")
+        return FileResponse(path, filename=path.name)
 
-    if kind in consolidator.BOT_OUTPUTS:
-        bot_path = run_dir / consolidator.BOT_OUTPUTS[kind]
+    if kind in BOT_OUTPUTS:
+        bot_path = run_dir / BOT_OUTPUTS[kind]
         if bot_path.exists():
             return FileResponse(bot_path, filename=bot_path.name)
         raise HTTPException(status_code=404, detail=f"No output found for {kind}")
@@ -568,7 +736,7 @@ async def index():
     index_path = Path("index.html")
     if index_path.exists():
         return HTMLResponse(index_path.read_text())
-    return HTMLResponse("<h1>Travel Automation Hub</h1><p>UI not found.</p>")
+    return HTMLResponse("<h1>Globalpass Bot</h1><p>UI not found.</p>")
 
 
 @app.get("/airlines.json")

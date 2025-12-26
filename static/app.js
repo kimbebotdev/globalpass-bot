@@ -17,6 +17,7 @@ const travelStatusSelect = document.getElementById("travel_status");
 const addFlightBtn = document.getElementById("add-flight");
 const legsContainer = document.getElementById("legs-container");
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
+const timeOptions = Array.from({ length: 24 }, (_, h) => `${h.toString().padStart(2, "0")}:00`);
 
 let ws;
 let currentRunId = null;
@@ -72,6 +73,13 @@ function buildPayload() {
     time: leg.time,
     class: leg.class || "Economy",
   }));
+  for (let i = 0; i < trips.length; i++) {
+    const t = trips[i];
+    const it = itinerary[i];
+    if (!t.origin || !t.destination || !it.date || !it.time) {
+      throw new Error(`Leg ${i + 1}: origin, destination, date, and time are required`);
+    }
+  }
   const input = {
     flight_type: flightType,
     trips,
@@ -143,7 +151,7 @@ async function fetchResults(runId) {
   try {
     const res = await fetch(`/api/runs/${runId}`);
     const data = await res.json();
-    resultsBlock.textContent = JSON.stringify(data.consolidated || data, null, 2);
+    renderReport(data.report);
     fileList.innerHTML = "";
     if (data.files) {
       Object.entries(data.files).forEach(([name, path]) => {
@@ -175,6 +183,26 @@ async function download(kind) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function renderReport(report) {
+  if (!report || !report.Top_5_Overall || !report.Top_5_Overall.length) {
+    resultsBlock.textContent = "Report not available yet.";
+    return;
+  }
+  const top = report.Top_5_Overall.slice(0, 5);
+  const rows = top
+    .map(
+      (item) => `
+      <div class="chip">
+        #${item.Rank} ${item.Flight} · ${item.Airline} · Dep ${item.Departure} · Arr ${item.Arrival} · Chance ${item.Chance} · Score ${item.Score}
+      </div>`
+    )
+    .join("");
+  resultsBlock.innerHTML = `
+    <div><strong>Top 5 Overall</strong></div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rows}</div>
+  `;
 }
 
 function renderLegs() {
@@ -211,12 +239,12 @@ function renderLegs() {
     const grid = document.createElement("div");
     grid.className = "leg-grid";
 
-    grid.appendChild(makeInput("trips[].origin", leg.origin, "e.g. SFO", (val) => (leg.origin = val), "text", true));
+    grid.appendChild(makeInput("Origin", leg.origin, "e.g. DXB", (val) => (leg.origin = val)));
     grid.appendChild(
-      makeInput("trips[].destination", leg.destination, "e.g. LHR", (val) => (leg.destination = val), "text", true)
+      makeInput("Destination", leg.destination, "e.g. SIN", (val) => (leg.destination = val))
     );
-    grid.appendChild(makeInput("itinerary[].date", leg.date, "", (val) => (leg.date = val), "date", true));
-    grid.appendChild(makeInput("itinerary[].time", leg.time, "00:00", (val) => (leg.time = val), "time", true));
+    grid.appendChild(makeInput("Date", leg.date, "", (val) => (leg.date = val), "date"));
+    grid.appendChild(makeTimeSelect(leg));
     grid.appendChild(makeClassSelect(leg));
 
     card.appendChild(grid);
@@ -224,14 +252,13 @@ function renderLegs() {
   });
 }
 
-function makeInput(labelText, value, placeholder, onChange, type = "text", required = false) {
+function makeInput(labelText, value, placeholder, onChange, type = "text") {
   const wrap = document.createElement("label");
   wrap.textContent = labelText;
   const input = document.createElement("input");
   input.type = type;
   input.placeholder = placeholder;
   input.value = value || "";
-  if (required) input.required = true;
   input.addEventListener("input", (e) => onChange(e.target.value));
   wrap.appendChild(input);
   return wrap;
@@ -239,7 +266,7 @@ function makeInput(labelText, value, placeholder, onChange, type = "text", requi
 
 function makeClassSelect(leg) {
   const wrap = document.createElement("label");
-  wrap.textContent = "itinerary[].class";
+  wrap.textContent = "Class";
   const select = document.createElement("select");
   classOptions.forEach((opt) => {
     const option = document.createElement("option");
@@ -249,6 +276,22 @@ function makeClassSelect(leg) {
   });
   select.value = leg.class || classOptions[0];
   select.addEventListener("change", (e) => (leg.class = e.target.value));
+  wrap.appendChild(select);
+  return wrap;
+}
+
+function makeTimeSelect(leg) {
+  const wrap = document.createElement("label");
+  wrap.textContent = "Time";
+  const select = document.createElement("select");
+  timeOptions.forEach((opt) => {
+    const option = document.createElement("option");
+    option.value = opt;
+    option.textContent = opt;
+    select.appendChild(option);
+  });
+  select.value = leg.time || timeOptions[0];
+  select.addEventListener("change", (e) => (leg.time = e.target.value));
   wrap.appendChild(select);
   return wrap;
 }
@@ -327,8 +370,8 @@ fileInput.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-downloadJsonBtn.addEventListener("click", () => download("json"));
-downloadXlsxBtn.addEventListener("click", () => download("excel"));
+downloadJsonBtn.addEventListener("click", () => download("report_json"));
+downloadXlsxBtn.addEventListener("click", () => download("report_excel"));
 form.addEventListener("submit", startRun);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
 addFlightBtn.addEventListener("click", () => {

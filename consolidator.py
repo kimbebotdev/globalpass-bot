@@ -7,7 +7,7 @@ import pandas as pd
 BOT_OUTPUTS = {
     "myidtravel": "myidtravel_flightschedule.json",
     "google_flights": "google_flights_results.json",
-    "stafftraveler": "stafftraveler_results.json",
+    "stafftraveler": "stafftraveller_results.json",
 }
 
 
