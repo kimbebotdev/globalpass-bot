@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,12 @@ if str(BASE_DIR) not in sys.path:
 import config
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
 def read_input(path: str) -> Dict[str, Any]:
     input_path = Path(path)
@@ -41,7 +48,7 @@ def read_input(path: str) -> Dict[str, Any]:
             raise SystemExit("itinerary must contain two entries (departure, return) for round-trip.")
     elif flight_type == "multiple-legs":
         # Not implemented yet; allow but warn
-        print("Warning: multiple-legs not fully supported yet; using first itinerary leg only.")
+        logger.warning("multiple-legs not fully supported yet; using first itinerary leg only.")
     else:
         raise SystemExit(f"Unsupported flight_type '{flight_type}'. Use one-way, round-trip, or multiple-legs.")
     return data
@@ -238,14 +245,14 @@ async def _fill_time_input(handle, value: str) -> bool:
     page_obj = getattr(handle, "page", None)
     
     if not page_obj:
-        print("Warning: No page object found for time input")
+        logger.warning("No page object found for time input")
         return False
     
     try:
         # Parse the time value
         parts = value.strip().split(":")
         if len(parts) != 2:
-            print(f"Invalid time format: {value}. Expected HH:MM")
+            logger.warning("Invalid time format for time input: %s", value)
             return False
         
         hour = parts[0].strip().lstrip("0") or "0"
@@ -269,21 +276,21 @@ async def _fill_time_input(handle, value: str) -> bool:
                 await handle.click(force=True)
                 await page_obj.wait_for_timeout(400)
             except Exception as e:
-                print(f"Could not click time input: {e}")
+                logger.debug("Could not click time input: %s", e)
                 return False
         
         # Wait for dropdown to appear
         try:
             await page_obj.wait_for_selector('div[role="menu"][id*="dropdown-menu"].show', timeout=2000, state="visible")
         except Exception:
-            print("Dropdown menu did not appear")
+            logger.debug("Dropdown menu did not appear for time input")
             # Try fallback: direct input
             return await _fill_time_fallback(handle, value)
         
         # Find the dropdown menu - it should be visible now
         dropdown = page_obj.locator('div[role="menu"][id*="dropdown-menu"].show').first
         if not await dropdown.count() or not await dropdown.is_visible():
-            print("Dropdown menu not visible")
+            logger.debug("Dropdown menu not visible for time input")
             return await _fill_time_fallback(handle, value)
         
         # Find all menu items
@@ -321,13 +328,13 @@ async def _fill_time_input(handle, value: str) -> bool:
                     continue
         
         if not selected:
-            print(f"Could not find matching time option for: {value}")
+            logger.debug("No matching time option found for %s", value)
             return await _fill_time_fallback(handle, value)
         
         return True
         
     except Exception as e:
-        print(f"Error in _fill_time_input: {e}")
+        logger.error("Error in _fill_time_input for value %s: %s", value, e, exc_info=True)
         # Fallback to direct input
         return await _fill_time_fallback(handle, value)
 
@@ -353,7 +360,7 @@ async def _fill_time_fallback(handle, value: str) -> bool:
             )
         return True
     except Exception as e:
-        print(f"Fallback also failed: {e}")
+        logger.debug("Fallback time fill failed: %s", e)
         return False
 
 
@@ -629,15 +636,15 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
             data = await response.text()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
-        print(f"Saved flightschedule response to {output_path}")
+        logger.info("Saved flightschedule response to %s", output_path)
     except asyncio.TimeoutError:
-        print("Timed out waiting for flightschedule response; no JSON saved.")
+        logger.warning("Timed out waiting for flightschedule response; no JSON saved.")
     except Exception as exc:
-        print(f"Error capturing flightschedule response: {exc}")
+        logger.error("Error capturing flightschedule response: %s", exc, exc_info=True)
 
 
 async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
-    print("Successful login")
+    logger.info("Successful login; filling form")
 
     # Click "New Flight" first, then close modal if it appears.
     new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first

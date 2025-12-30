@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import re
 import sys
 from datetime import date, datetime
@@ -19,6 +20,12 @@ from bots.myidtravel_bot import read_input
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
+logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
 
 def _parse_date(date_str: str) -> Optional[datetime]:
@@ -230,7 +237,7 @@ async def _scrape_section(items, limit: int) -> List[Dict[str, Any]]:
             if flight_data:
                 results.append(flight_data)
         except Exception as e:
-            print(f"Error scraping card {idx}: {e}")
+            logger.error("Error scraping card %s: %s", idx, e, exc_info=True)
             continue
 
     return results
@@ -374,7 +381,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
     except Exception as e:
-        print(f"Error extracting flight data: {e}")
+        logger.error("Error extracting flight data: %s", e, exc_info=True)
 
     return flight_data
 
@@ -440,15 +447,15 @@ async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any
                 found_other = items
 
         if found_top:
-            print(f"Found {await found_top.count()} top flights")
+            logger.info("Found %s top flights", await found_top.count())
             top_flights = await _scrape_section(found_top, limit)
         if found_other:
-            print(f"Found {await found_other.count()} other flights")
+            logger.info("Found %s other flights", await found_other.count())
             other_flights = await _scrape_section(found_other, limit)
 
     all_flights: List[Dict[str, Any]] = []
     if not top_flights and not other_flights:
-        print("No sections found, trying flat list...")
+        logger.info("No sections found, trying flat list scrape")
         selectors = [
             "div.FXkZv[role='main'] li.pIav2d",
             "li.pIav2d",
@@ -462,7 +469,7 @@ async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any
         for sel in selectors:
             loc = page.locator(sel)
             if await loc.count():
-                print(f"Found {await loc.count()} flights using selector: {sel}")
+                logger.info("Found %s flights using selector: %s", await loc.count(), sel)
                 cards = loc
                 break
         if cards:
@@ -680,7 +687,7 @@ async def _fill_simple_field(locator, value: str) -> None:
     page_obj = getattr(target, "page", None)
     
     if not page_obj:
-        print(f"Warning: No page object found for field")
+        logger.warning("No page object found for field")
         return
     
     try:
@@ -702,12 +709,12 @@ async def _fill_simple_field(locator, value: str) -> None:
             await target.click(timeout=3000)
             await page_obj.wait_for_timeout(800)
         except Exception as e:
-            print(f"Normal click failed, trying force click: {e}")
+            logger.debug("Normal click failed, trying force click: %s", e)
             try:
                 await target.click(force=True, timeout=3000)
                 await page_obj.wait_for_timeout(800)
             except Exception as e2:
-                print(f"Force click also failed: {e2}")
+                logger.debug("Force click also failed: %s", e2)
                 return
 
         # Find the active input (the one that's focused)
@@ -716,7 +723,7 @@ async def _fill_simple_field(locator, value: str) -> None:
             # The focused element is usually the correct input
             overlay_input = page_obj.locator(':focus').first
             if await overlay_input.count() > 0 and await overlay_input.is_visible():
-                print("Found focused input")
+                logger.debug("Found focused input")
             else:
                 overlay_input = None
         except Exception:
@@ -728,12 +735,12 @@ async def _fill_simple_field(locator, value: str) -> None:
                 all_combos = page_obj.locator('input[role="combobox"]:visible')
                 if await all_combos.count() > 0:
                     overlay_input = all_combos.first
-                    print("Found visible combobox")
+                    logger.debug("Found visible combobox")
             except Exception:
                 pass
 
         if not overlay_input:
-            print("Could not find overlay input, using original target")
+            logger.debug("Could not find overlay input, using original target")
             overlay_input = target
 
         # Clear and type the value
@@ -748,12 +755,12 @@ async def _fill_simple_field(locator, value: str) -> None:
                 pass
             
             # Type the value
-            print(f"Typing value: {value}")
+            logger.debug("Typing value: %s", value)
             await page_obj.keyboard.type(value, delay=80)
             await page_obj.wait_for_timeout(1500)  # Longer wait for autocomplete
             
         except Exception as e:
-            print(f"Error during input: {e}")
+            logger.debug("Error during input: %s", e)
             return
 
         # Now find the options - they appear in a listbox, not necessarily in a dialog
@@ -767,9 +774,9 @@ async def _fill_simple_field(locator, value: str) -> None:
             try:
                 await page_obj.wait_for_selector(listbox_selector, timeout=3000, state="visible")
                 await page_obj.wait_for_timeout(300)
-                print("Found listbox")
+                logger.debug("Found listbox")
             except Exception as e:
-                print(f"Listbox not found: {e}")
+                logger.debug("Listbox not found: %s", e)
                 # Try alternate wait
                 await page_obj.wait_for_timeout(1000)
             
@@ -782,11 +789,11 @@ async def _fill_simple_field(locator, value: str) -> None:
                 option = page_obj.locator(option_selector).first
                 if await option.count() > 0:
                     is_visible = await option.is_visible()
-                    print(f"Found option by data-code, visible: {is_visible}")
+                    logger.debug("Found option by data-code, visible: %s", is_visible)
                     if not is_visible:
                         option = None
             except Exception as e:
-                print(f"Error finding by data-code: {e}")
+                logger.debug("Error finding by data-code: %s", e)
                 option = None
             
             # Strategy 2: Search through all airport options (data-type="1")
@@ -794,7 +801,7 @@ async def _fill_simple_field(locator, value: str) -> None:
                 try:
                     airport_options = page_obj.locator('li[role="option"][data-type="1"]')
                     count = await airport_options.count()
-                    print(f"Searching through {count} airport options")
+                    logger.debug("Searching through %s airport options", count)
                     
                     for i in range(min(count, 20)):
                         opt = airport_options.nth(i)
@@ -806,29 +813,29 @@ async def _fill_simple_field(locator, value: str) -> None:
                             opt_code = await opt.get_attribute("data-code")
                             opt_label = await opt.get_attribute("aria-label")
                             
-                            print(f"  Option {i}: code={opt_code}, label={opt_label}")
+                            logger.debug("Option %s: code=%s label=%s", i, opt_code, opt_label)
                             
                             if opt_code == code:
                                 option = opt
-                                print(f"  -> MATCH by code!")
+                                logger.debug("Match by code")
                                 break
                             elif opt_label and code in opt_label:
                                 option = opt
-                                print(f"  -> MATCH by label!")
+                                logger.debug("Match by label")
                                 break
                         except Exception as e:
-                            print(f"  Error checking option {i}: {e}")
+                            logger.debug("Error checking option %s: %s", i, e)
                             continue
                 except Exception as e:
-                    print(f"Error searching airport options: {e}")
+                    logger.debug("Error searching airport options: %s", e)
             
             # Strategy 3: Any visible option containing the code
             if not option:
                 try:
-                    print(f"Trying text-based search for: {code}")
+                    logger.debug("Trying text-based search for: %s", code)
                     all_options = page_obj.locator(f'li[role="option"]:visible')
                     count = await all_options.count()
-                    print(f"Found {count} visible options total")
+                    logger.debug("Found %s visible options total", count)
                     
                     for i in range(min(count, 10)):
                         opt = all_options.nth(i)
@@ -836,12 +843,12 @@ async def _fill_simple_field(locator, value: str) -> None:
                             text = await opt.inner_text()
                             if code in text:
                                 option = opt
-                                print(f"Found option by text: {text[:100]}")
+                                logger.debug("Found option by text match")
                                 break
                         except Exception:
                             continue
                 except Exception as e:
-                    print(f"Error in text search: {e}")
+                    logger.debug("Error in text search: %s", e)
             
             # Click the matched option
             if option and await option.count() > 0:
@@ -851,35 +858,31 @@ async def _fill_simple_field(locator, value: str) -> None:
                     
                     try:
                         await option.click(timeout=2000)
-                        print(f"Successfully clicked option")
+                        logger.debug("Clicked option")
                     except Exception:
                         await option.click(force=True)
-                        print(f"Successfully force-clicked option")
+                        logger.debug("Force-clicked option")
                     
                     await page_obj.wait_for_timeout(600)
                     return
                 except Exception as e:
-                    print(f"Error clicking option: {e}")
+                    logger.debug("Error clicking option: %s", e)
             else:
-                print(f"No matching option found for {code}")
+                logger.debug("No matching option found for %s", code)
                 
         except Exception as e:
-            print(f"Error with option selection: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.debug("Error with option selection: %s", e, exc_info=True)
 
         # Fallback: Press Enter
         try:
-            print("Pressing Enter as fallback")
+            logger.debug("Pressing Enter as fallback")
             await page_obj.keyboard.press("Enter")
             await page_obj.wait_for_timeout(600)
         except Exception as e:
-            print(f"Could not press Enter: {e}")
+            logger.debug("Could not press Enter: %s", e)
             
     except Exception as e:
-        print(f"Error filling field with value '{value}': {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error("Error filling field with value '%s': %s", value, e, exc_info=True)
 
 async def _fill_basic_form(
     page,
@@ -893,7 +896,7 @@ async def _fill_basic_form(
     except Exception:
         pass
 
-    print(f"Attempting to fill: {origin} -> {destination}")
+    logger.info("Filling basic form %s -> %s", origin, destination)
 
     fields_container = page.locator(config.GF_FIELDS_CONTAINER).first
     if not await fields_container.count():
@@ -909,15 +912,13 @@ async def _fill_basic_form(
     # Print the HTML including the element's own tags (Outer HTML)
     # print(await from_field.evaluate("el => el.outerHTML"))
 
-    debug_html = await from_field.evaluate("el => el.outerHTML")
-
     to_field = row.locator(config.GF_TO_INPUT).first if await row.locator(config.GF_TO_INPUT).count() else page.locator(config.GF_TO_INPUT).first
 
     await _fill_simple_field(from_field, origin)
-    print(f"Filled origin: {origin}")
+    logger.info("Filled origin: %s", origin)
 
     await _fill_simple_field(to_field, destination)
-    print(f"Filled destination: {destination}")
+    logger.info("Filled destination: %s", destination)
 
     date_fields = row.locator(config.GF_DEPART_INPUT)
     depart_field = date_fields.first if await date_fields.count() else page.locator(config.GF_DEPART_INPUT).first
@@ -1129,8 +1130,10 @@ async def _select_seat_class(page, seat_class: str) -> None:
 
 
 async def run(headless: bool, input_path: str, output: Path, limit: int, screenshot: str | None) -> None:
+    logger.info("Starting Google Flights run headless=%s input=%s limit=%s", headless, input_path, limit)
     input_data = read_input(input_path)
     legs, flight_type = build_legs(input_data)
+    logger.info("Prepared %s leg(s) for flight_type=%s", len(legs), flight_type)
     nonstop_only = bool(input_data.get("nonstop_flights"))
 
     results: List[Dict[str, Any]] = []
@@ -1151,8 +1154,10 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
         if input_data.get("itinerary"):
             seat_class = input_data["itinerary"][0].get("class", "")
         await _select_seat_class(page, seat_class)
+        logger.info("Configured trip type=%s passengers seat_class=%s", flight_type, seat_class or "default")
 
         if flight_type == "multiple-legs" and len(legs) > 1:
+            logger.info("Filling %s multi-city legs", len(legs))
             await _ensure_leg_rows(page, len(legs))
             for idx, leg in enumerate(legs):
                 await _fill_leg_row(
@@ -1164,6 +1169,7 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
                 )
         else:
             leg = legs[0]
+            logger.info("Filling basic form for %s -> %s on %s", leg.get("origin"), leg.get("destination"), leg.get("depart_date"))
             await _fill_basic_form(
                 page,
                 leg.get("origin", ""),
@@ -1186,6 +1192,7 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
 
         if nonstop_only:
             await _apply_nonstop_filter(page)
+            logger.info("Applied nonstop filter")
 
         try:
             await _wait_for_results(page, timeout_ms=15000)
@@ -1196,6 +1203,12 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
                 pass
 
         flights = await _scrape_results(page, limit=limit)
+        logger.info(
+            "Scraped flights: top=%s other=%s all=%s",
+            len(flights.get("top_flights", [])),
+            len(flights.get("other_flights", [])),
+            len(flights.get("all", [])),
+        )
         if not any(flights.values()):
             flights = {"top_flights": [], "other_flights": [], "all": []}
         results.append(
@@ -1217,7 +1230,7 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(results, indent=2))
-    print(f"Wrote {len(results)} leg result(s) to {output}")
+    logger.info("Wrote %s leg result(s) to %s", len(results), output)
 
 
 def parse_args() -> argparse.Namespace:

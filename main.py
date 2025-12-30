@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import shutil
 from contextlib import contextmanager
 from datetime import datetime
@@ -18,6 +19,12 @@ import config
 from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 
 load_dotenv()
+logger = logging.getLogger("globalpass")
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
 AIRLINE_OUTPUT = Path("airlines.json")
 ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")
@@ -199,6 +206,7 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         state.status = "running"
         await state.push_status()
         await state.log("Run started; launching three bots concurrently.")
+        logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
 
         input_path = state.output_dir / "input.json"
         input_path.write_text(json.dumps(state.input_data, indent=2))
@@ -219,6 +227,7 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
         state.completed_at = datetime.utcnow()
         await state.log("Run finished." if not had_error else "Run finished with errors.")
+        logger.info("Run %s completed status=%s", state.id, state.status)
         await state.push_status()
         state.done.set()
 
@@ -657,6 +666,7 @@ async def start_run(payload: Dict[str, Any] = Body(...)):
     state = RunState(run_id, run_dir, input_data)
     RUNS[run_id] = state
 
+    logger.info("Queued run %s", run_id)
     asyncio.create_task(execute_run(state, limit=limit, headed=headed))
     return {"run_id": run_id, "status": state.status, "output_dir": str(run_dir)}
 
@@ -753,4 +763,4 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host=config.API_HOST, port=config.API_PORT, reload=True)

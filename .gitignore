@@ -4,10 +4,10 @@
 .DS_store
 __pycache__
 
-json
-
 # Ignore auto generated files from root
 *.json
 *.png
 
 outputs
+env
+json
