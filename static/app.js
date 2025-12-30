@@ -370,8 +370,8 @@ fileInput.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-downloadJsonBtn.addEventListener("click", () => download("report_json"));
-downloadXlsxBtn.addEventListener("click", () => download("report_excel"));
+downloadJsonBtn.addEventListener("click", () => download("json"));
+downloadXlsxBtn.addEventListener("click", () => download("excel"));
 form.addEventListener("submit", startRun);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
 addFlightBtn.addEventListener("click", () => {
