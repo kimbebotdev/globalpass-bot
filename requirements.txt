@@ -4,3 +4,5 @@ pandas
 openpyxl
 fastapi
 uvicorn[standard]
+slack-sdk
+aiohttp

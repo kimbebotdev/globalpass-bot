@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-import shutil
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import Page, async_playwright
 
+# Slack imports
+from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.socket_mode.aiohttp import SocketModeClient
+from slack_sdk.socket_mode.request import SocketModeRequest
+from slack_sdk.socket_mode.response import SocketModeResponse
+
 import config
 from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 
@@ -25,6 +31,11 @@ if not logging.getLogger().handlers:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+# Slack configuration
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_USER_OAUTH_TOKEN")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
+SLACK_ENABLED = bool(SLACK_BOT_TOKEN and SLACK_APP_TOKEN)
 
 AIRLINE_OUTPUT = Path("airlines.json")
 ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")
@@ -49,6 +60,187 @@ OUTPUT_ROOT = Path("outputs")
 RUNS: Dict[str, "RunState"] = {}
 RUN_SEMAPHORE = asyncio.Semaphore(1)
 
+# Slack clients
+slack_web_client: Optional[AsyncWebClient] = None
+slack_socket_client: Optional[SocketModeClient] = None
+slack_connected: bool = False
+
+
+async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
+    """Process incoming Slack Socket Mode events"""
+
+    # Acknowledge the request
+    response = SocketModeResponse(envelope_id=req.envelope_id)
+    await client.send_socket_mode_response(response)
+
+    # Check if it's an event
+    if req.type == "events_api":
+        event = req.payload.get("event", {})
+
+        # Check if it's a message event (ignore bot messages and subtypes)
+        if event.get("type") == "message" and "subtype" not in event and "bot_id" not in event:
+            text = event.get("text", "").lower()
+            user = event.get("user")
+            channel = event.get("channel")
+            ts = event.get("ts")
+
+            # Check for "run scraper" command
+            if "run scraper" in text:
+                logger.info(f"Scraper triggered by user {user} in channel {channel}")
+
+                try:
+                    # Add reaction to acknowledge
+                    await slack_web_client.reactions_add(
+                        channel=channel,
+                        timestamp=ts,
+                        name="white_check_mark"
+                    )
+
+                    # Parse command for parameters (optional)
+                    # Format: "run scraper [origin] [destination] [date]"
+                    parts = text.split()
+
+                    # Default input data
+                    input_data = {
+                        "flight_type": "one-way",
+                        "nonstop_flights": True,
+                        "airline": "",
+                        "travel_status": "Bookable",
+                        "trips": [{"origin": "DXB", "destination": "SIN"}],
+                        "itinerary": [{"date": "01/10/2026", "time": "00:00", "class": "Economy"}],
+                        "traveller": [{"name": "Slack User", "salutation": "MR", "checked": True}],
+                        "travel_partner": []
+                    }
+
+                    # Try to parse origin, destination, and date from message
+                    if len(parts) >= 4:
+                        try:
+                            input_data["trips"][0]["origin"] = parts[2].upper()
+                            input_data["trips"][0]["destination"] = parts[3].upper()
+                            if len(parts) >= 5:
+                                input_data["itinerary"][0]["date"] = parts[4]
+                        except Exception as parse_error:
+                            logger.warning(f"Could not parse command parameters: {parse_error}")
+
+                    # Create and start run
+                    run_id = make_run_id()
+                    run_dir = OUTPUT_ROOT / run_id
+                    run_dir.mkdir(parents=True, exist_ok=True)
+
+                    state = RunState(run_id, run_dir, input_data)
+                    state.slack_channel = channel
+                    state.slack_thread_ts = ts
+                    RUNS[run_id] = state
+
+                    # Send initial confirmation
+                    await slack_web_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=ts,
+                        text=f"<@{user}> Scraper started! :rocket:\n"
+                             f"Run ID: `{run_id}`\n"
+                             f"Route: {input_data['trips'][0]['origin']} → {input_data['trips'][0]['destination']}\n"
+                             f"Status: Running..."
+                    )
+
+                    # Start the run
+                    asyncio.create_task(execute_run(state, limit=30, headed=False))
+
+                except Exception as e:
+                    logger.error(f"Error processing Slack command: {e}", exc_info=True)
+                    try:
+                        await slack_web_client.chat_postMessage(
+                            channel=channel,
+                            thread_ts=ts,
+                            text=f"<@{user}> Error starting scraper: {str(e)} :x:"
+                        )
+                    except:
+                        pass
+
+            # Check for "scraper status" command
+            elif "scraper status" in text:
+                logger.info(f"Status check by user {user} in channel {channel}")
+
+                try:
+                    # Get recent runs
+                    recent_runs = sorted(RUNS.items(), key=lambda x: x[1].created_at, reverse=True)[:5]
+
+                    if not recent_runs:
+                        status_text = "No scraper runs found."
+                    else:
+                        status_lines = ["*Recent Scraper Runs:*\n"]
+                        for run_id, state in recent_runs:
+                            status_emoji = {
+                                "pending": "⏳",
+                                "running": "🔄",
+                                "completed": "✅",
+                                "error": "❌"
+                            }.get(state.status, "❓")
+
+                            route = "N/A"
+                            if state.input_data.get("trips"):
+                                trip = state.input_data["trips"][0]
+                                route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+
+                            status_lines.append(
+                                f"{status_emoji} `{run_id}` - {state.status.upper()} - {route}"
+                            )
+
+                        status_text = "\n".join(status_lines)
+
+                    await slack_web_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=ts,
+                        text=status_text
+                    )
+
+                except Exception as e:
+                    logger.error(f"Error checking status: {e}", exc_info=True)
+
+
+async def start_slack_bot():
+    """Initialize and start the Slack bot"""
+    global slack_web_client, slack_socket_client, slack_connected
+
+    if not SLACK_ENABLED:
+        logger.info("Slack integration disabled (missing tokens)")
+        return
+
+    try:
+        slack_web_client = AsyncWebClient(token=SLACK_BOT_TOKEN)
+        slack_socket_client = SocketModeClient(
+            app_token=SLACK_APP_TOKEN,
+            web_client=slack_web_client
+        )
+
+        # Register event handler
+        slack_socket_client.socket_mode_request_listeners.append(process_slack_event)
+
+        # Connect in background
+        await slack_socket_client.connect()
+        slack_connected = True
+
+        logger.info("Slack bot connected and listening for commands!")
+        logger.info("Available commands: 'run scraper [origin] [destination] [date]', 'scraper status'")
+
+    except Exception as e:
+        logger.error(f"Failed to start Slack bot: {e}", exc_info=True)
+        slack_socket_client = None
+        slack_connected = False
+
+
+async def stop_slack_bot():
+    """Gracefully stop the Slack bot"""
+    global slack_socket_client, slack_connected
+
+    if slack_socket_client:
+        try:
+            await slack_socket_client.close()
+            logger.info("Slack bot disconnected")
+        except Exception as e:
+            logger.error(f"Error stopping Slack bot: {e}")
+        finally:
+            slack_connected = False
+
 
 class RunState:
     def __init__(self, run_id: str, output_dir: Path, input_data: Dict[str, Any]):
@@ -63,6 +255,62 @@ class RunState:
         self.subscribers: dict[WebSocket, asyncio.Queue] = {}
         self.done = asyncio.Event()
         self.result_files: Dict[str, Path] = {}
+
+        # Slack-specific fields
+        self.slack_channel: Optional[str] = None
+        self.slack_thread_ts: Optional[str] = None
+
+    async def push_status(self) -> None:
+        payload = {
+            "type": "status",
+            "status": self.status,
+            "error": self.error,
+            "run_id": self.id,
+        }
+        if self.completed_at:
+            payload["completed_at"] = self.completed_at.isoformat()
+        await self._broadcast(payload, store=False)
+
+        # Send Slack notification if this run was triggered from Slack
+        if self.slack_channel and self.slack_thread_ts and slack_web_client:
+            await self._send_slack_status_update()
+
+    async def _send_slack_status_update(self):
+        """Send status update to Slack thread"""
+        try:
+            if self.status == "completed":
+                # Build file links
+                route = "N/A"
+                if self.input_data.get("trips"):
+                    trip = self.input_data["trips"][0]
+                    route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+
+                message = (
+                    f"*Scraper Completed!*\n"
+                    f"Run ID: `{self.id}`\n"
+                    f"Route: {route}\n"
+                    f"Files generated:\n"
+                )
+
+                for file_key, file_path in self.result_files.items():
+                    if file_path.exists():
+                        message += f"• {file_key}\n"
+
+                message += f"\nDownload results at: `{self.output_dir}`"
+
+            elif self.status == "error":
+                message = f"*Scraper Failed*\nRun ID: `{self.id}`\nError: {self.error}"
+            else:
+                return  # Don't send updates for pending/running status
+
+            slack_web_client.chat_postMessage(
+                channel=self.slack_channel,
+                thread_ts=self.slack_thread_ts,
+                text=message
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending Slack notification: {e}")
 
     def subscribe(self, ws: WebSocket) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
@@ -125,7 +373,7 @@ def normalize_google_time(time_str: str) -> Optional[str]:
         return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
     except:
         return None
-    
+
 
 def to_minutes(duration_str: str) -> int:
     """Converts duration strings like '7h 25m' to total minutes."""
@@ -483,20 +731,21 @@ async def scrape_airlines_task(
 async def _run_generate_flight_loads(state: RunState) -> None:
     """
     Generate standby_report_multi.* using the three bot outputs.
-    This is the migrated logic from generate-flight-loads.py.
+    Implements the scoring formula from generate-flights.py with separate logic
+    for Bookable and R2 Standby status.
     """
     await state.log("[report] Starting flight loads report generation...")
-    
+
     try:
         # Load all sources directly from run directory
         myid_path = state.result_files.get("myidtravel")
         google_path = state.result_files.get("google_flights")
         staff_path = state.result_files.get("stafftraveler")
-        
+
         if not all([myid_path, google_path, staff_path]):
             await state.log("[report] Missing required input files, skipping report generation")
             return
-        
+
         # Load JSON data
         with open(myid_path, 'r') as f:
             myid_data = json.load(f)
@@ -504,115 +753,355 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             google_data = json.load(f)
         with open(staff_path, 'r') as f:
             staff_data = json.load(f)
-        
+
         await state.log("[report] Loaded all input files successfully")
-        
-        # Pre-process external sources for matching
-        staff_map = {
-            d['airline_flight_number']: d.get('aircraft', 'N/A')
-            for entry in staff_data
-            for d in entry.get('flight_details', [])
-        }
-        
-        google_map = {}
-        for entry in google_data:
-            for ftype in ['top_flights', 'other_flights']:
-                for g_f in entry.get('flights', {}).get(ftype, []):
-                    norm_time = normalize_google_time(g_f.get('depart_time', ''))
-                    if norm_time:
-                        google_map[(g_f['airline'], norm_time)] = True
-        
-        chance_weights = {"HIGH": 100, "MID": 50, "LOW": 10}
-        eligible_flights = []
-        
-        # Filter and score selectable flights
+
+        # Extract input data for summary
+        input_data = state.input_data
+
+        # Build flight registry
+        registry = {}
+
+        # 1. Process Stafftraveler data
+        for entry in staff_data:
+            for f in entry.get('flight_details', []):
+                fn = f['airline_flight_number']
+                registry[fn] = {
+                    'Flight': fn,
+                    'Airline': f['airlines'],
+                    'Aircraft': f.get('aircraft', 'N/A'),
+                    'Departure': f.get('departure_time', 'N/A'),
+                    'Arrival': f.get('arrival_time', 'N/A'),
+                    'Duration': to_minutes(f.get('duration', '0h 0m')),
+                    'Duration_Str': f.get('duration', 'N/A'),
+                    'Stops': 0,
+                    'Selectable': False,
+                    'Chance': 'Unknown',
+                    'Price': 32000,
+                    'Sources': {'Stafftraveler'}
+                }
+
+        # 2. Process MyIDTravel data
         for routing in myid_data.get('routings', []):
-            for flight in routing.get('flights', []):
-                if flight.get('selectable') is not True:
-                    continue
-                
-                seg = flight['segments'][0]
-                f_num = seg['flightNumber']
-                airline = seg['operatingAirline']['name']
-                dep_time = seg['departureTime']
-                
-                # Source detection
-                in_staff = f_num in staff_map
-                in_google = (airline, dep_time) in google_map
-                sources = ["MyIDTravel.com"]
-                if in_google:
-                    sources.append("Google Flights")
-                if in_staff:
-                    sources.append("Stafftraveler")
-                
-                # Scoring logic
-                dur_min = to_minutes(flight.get('duration', '0h 0m'))
-                score = chance_weights.get(flight.get('chance', 'LOW'), 0)
-                score += 20 if len(flight.get('segments', [])) == 1 else 0  # Nonstop bonus
-                score += max(0, (720 - dur_min) / 10)  # Duration bonus
-                
-                eligible_flights.append({
-                    "Flight": f_num,
-                    "Airline": airline,
-                    "Aircraft": staff_map.get(f_num, "N/A"),
-                    "Departure": dep_time,
-                    "Arrival": seg['arrivalTime'],
-                    "Duration": flight.get('duration'),
-                    "Chance": flight.get('chance'),
-                    "Source": ", ".join(sources),
-                    "Score": round(score, 2),
-                    "In_Staff": in_staff,
-                    "In_Google": in_google
+            for f in routing.get('flights', []):
+                seg = f['segments'][0]
+                fn = seg['flightNumber']
+
+                if fn not in registry:
+                    registry[fn] = {
+                        'Flight': fn,
+                        'Airline': seg['operatingAirline']['name'],
+                        'Aircraft': seg.get('aircraft', 'N/A'),
+                        'Departure': seg['departureTime'],
+                        'Arrival': seg['arrivalTime'],
+                        'Duration': to_minutes(f.get('duration', '0h 0m')),
+                        'Duration_Str': f.get('duration', 'N/A'),
+                        'Stops': f.get('stopQuantity', 0),
+                        'Price': 32000,
+                        'Sources': set()
+                }
+
+                registry[fn]['Sources'].add('MyIDTravel')
+                registry[fn].update({
+                    'Selectable': f.get('selectable', False),
+                    'Chance': f.get('chance', 'Unknown'),
+                    'Departure': seg['departureTime'],
+                    'Arrival': seg['arrivalTime'],
                 })
-        
-        await state.log(f"[report] Processed {len(eligible_flights)} eligible flights")
-        
-        # Ranking helper function
-        def get_top_5(subset):
-            ranked = sorted(subset, key=lambda x: x['Score'], reverse=True)
-            final = []
-            for i, item in enumerate(ranked[:5], 1):
-                clean = {"Rank": i}
-                clean.update({k: v for k, v in item.items() if not k.startswith("In_")})
-                final.append(clean)
-            return final
-        
-        # Generate output lists
+
+        # 3. Process Google Flights data
+        for entry in google_data:
+            flights_data = entry.get('flights', {})
+            all_google_flights = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+
+            for g_f in all_google_flights:
+                import re
+                price_str = g_f.get('price', '') or g_f.get('summary', '')
+                price_match = re.search(r'(\d+)', price_str.replace(',', '').replace('₱', ''))
+                price = int(price_match.group(1)) if price_match else 32000
+
+                # Try to extract flight number
+                fn_match = re.search(r'\b([A-Z]{2,3}\d{1,4})\b', g_f.get('summary', ''))
+                fn = fn_match.group(1) if fn_match else None
+
+                if fn and fn in registry:
+                    registry[fn]['Price'] = price
+                    registry[fn]['Sources'].add('Google Flights')
+                else:
+                    # Fallback: match by airline and duration
+                    g_airline = g_f.get('airline', '')
+                    g_duration = to_minutes(g_f.get('duration', '0h 0m'))
+
+                    for reg_fn, data in registry.items():
+                        if data['Airline'] == g_airline and abs(data['Duration'] - g_duration) <= 5:
+                            data['Price'] = price
+                            data['Sources'].add('Google Flights')
+                            break
+
+        await state.log(f"[report] Built registry with {len(registry)} flights")
+
+        # Calculate minimum duration for scoring
+        valid_durations = [f['Duration'] for f in registry.values() if f['Duration'] > 0]
+        min_dur = min(valid_durations) if valid_durations else 1
+
+        # Generate rankings for R2 Standby
+        standby_flights = []
+        for fn, f in registry.items():
+            if not f['Selectable']:
+                continue
+
+            chance_map = {'HIGH': 500, 'MEDIUM': 300, 'MID': 300, 'LOW': 100, 'Unknown': 0}
+            score = (chance_map.get(f['Chance'], 0)) + \
+                    (1000 if f['Stops'] == 0 else 0) + \
+                    ((min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0)
+
+            standby_flights.append({
+                'Flight': f['Flight'],
+                'Airline': f['Airline'],
+                'Aircraft': f['Aircraft'],
+                'Departure': f['Departure'],
+                'Arrival': f['Arrival'],
+                'Duration': f['Duration_Str'],
+                'Stops': f['Stops'],
+                'Chance': f['Chance'],
+                'Source': ', '.join(sorted(list(f['Sources']))),
+                'Score': round(score, 2)
+            })
+
+        standby_flights.sort(key=lambda x: x['Score'], reverse=True)
+        top_5_standby = []
+        for i, item in enumerate(standby_flights[:5], 1):
+            ranked_item = {
+                'Rank': i,
+                'Flight': item['Flight'],
+                'Airline': item['Airline'],
+                'Aircraft': item['Aircraft'],
+                'Departure': item['Departure'],
+                'Arrival': item['Arrival'],
+                'Duration': item['Duration'],
+                'Stops': item['Stops'],
+                'Chance': item['Chance'],
+                'Source': item['Source']
+            }
+            top_5_standby.append(ranked_item)
+
+        # Generate rankings for Bookable
+        bookable_flights = []
+        for fn, f in registry.items():
+            if not f['Selectable']:
+                continue
+
+            comfort_bonus = 200 if "A380" in f['Aircraft'] else 0
+            price_score = 1000 * (10000 / f['Price']) if f['Price'] > 0 else 0
+            score = price_score + comfort_bonus + \
+                    ((min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0)
+
+            bookable_flights.append({
+                'Flight': f['Flight'],
+                'Airline': f['Airline'],
+                'Aircraft': f['Aircraft'],
+                'Departure': f['Departure'],
+                'Arrival': f['Arrival'],
+                'Duration': f['Duration_Str'],
+                'Stops': f['Stops'],
+                'Price': f['Price'],
+                'Source': ', '.join(sorted(list(f['Sources']))),
+                'Score': round(score, 2)
+            })
+
+        bookable_flights.sort(key=lambda x: x['Score'], reverse=True)
+        top_5_bookable = []
+        for i, item in enumerate(bookable_flights[:5], 1):
+            ranked_item = {
+                'Rank': i,
+                'Flight': item['Flight'],
+                'Airline': item['Airline'],
+                'Aircraft': item['Aircraft'],
+                'Departure': item['Departure'],
+                'Arrival': item['Arrival'],
+                'Duration': item['Duration'],
+                'Stops': item['Stops'],
+                'Price': item['Price'],
+                'Source': item['Source']
+            }
+            top_5_bookable.append(ranked_item)
+
+        # Prepare data for all source sheets
+        myid_all_flights = []
+        for routing in myid_data.get('routings', []):
+            for f in routing.get('flights', []):
+                seg = f['segments'][0]
+                myid_all_flights.append({
+                    'Flight': seg['flightNumber'],
+                    'Airline': seg['operatingAirline']['name'],
+                    'Aircraft': seg.get('aircraft', 'N/A'),
+                    'Departure': seg['departureTime'],
+                    'Arrival': seg['arrivalTime'],
+                    'Duration': f.get('duration', 'N/A'),
+                    'Stops': f.get('stopQuantity', 0),
+                    'Chance': f.get('chance', 'N/A'),
+                    'Selectable': 'YES' if f.get('selectable', False) else 'NO'
+                })
+
+        staff_all_flights = []
+        for entry in staff_data:
+            for f in entry.get('flight_details', []):
+                staff_all_flights.append({
+                    'Flight': f['airline_flight_number'],
+                    'Airline': f['airlines'],
+                    'Aircraft': f.get('aircraft', 'N/A'),
+                    'Departure': f.get('departure_time', 'N/A'),
+                    'Arrival': f.get('arrival_time', 'N/A'),
+                    'Duration': f.get('duration', 'N/A')
+                })
+
+        google_all_flights = []
+        for entry in google_data:
+            flights_data = entry.get('flights', {})
+            all_gf = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+            for g_f in all_gf:
+                google_all_flights.append({
+                    'Airline': g_f.get('airline', 'N/A'),
+                    'Departure': g_f.get('depart_time', 'N/A'),
+                    'Arrival': g_f.get('arrive_time', 'N/A'),
+                    'Duration': g_f.get('duration', 'N/A'),
+                    'Price': g_f.get('price', 'N/A'),
+                    'Summary': g_f.get('summary', 'N/A')
+                })
+
+        # Prepare input summary from the actual endpoint input
+        input_summary = []
+
+        # Extract basic search parameters
+        flight_type = input_data.get('flight_type', 'N/A')
+        nonstop_flights = 'Yes' if input_data.get('nonstop_flights', False) else 'No'
+        airline = input_data.get('airline', 'All Airlines') or 'All Airlines'
+        travel_status = input_data.get('travel_status', 'N/A')
+
+        input_summary.append({'Parameter': 'Flight Type', 'Value': flight_type})
+        input_summary.append({'Parameter': 'Nonstop Only', 'Value': nonstop_flights})
+        input_summary.append({'Parameter': 'Airline', 'Value': airline})
+        input_summary.append({'Parameter': 'Travel Status', 'Value': travel_status})
+        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+
+        # Extract trip information
+        trips = input_data.get('trips', [])
+        for idx, trip in enumerate(trips, 1):
+            origin = trip.get('origin', 'N/A')
+            destination = trip.get('destination', 'N/A')
+            if len(trips) == 1:
+                input_summary.append({'Parameter': 'Origin', 'Value': origin})
+                input_summary.append({'Parameter': 'Destination', 'Value': destination})
+            else:
+                input_summary.append({'Parameter': f'Trip {idx} - Origin', 'Value': origin})
+                input_summary.append({'Parameter': f'Trip {idx} - Destination', 'Value': destination})
+
+        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+
+        # Extract itinerary information
+        itinerary = input_data.get('itinerary', [])
+        for idx, itin in enumerate(itinerary, 1):
+            date = itin.get('date', 'N/A')
+            time = itin.get('time', 'N/A')
+            cabin_class = itin.get('class', 'N/A')
+            if len(itinerary) == 1:
+                input_summary.append({'Parameter': 'Date', 'Value': date})
+                input_summary.append({'Parameter': 'Time', 'Value': time})
+                input_summary.append({'Parameter': 'Class', 'Value': cabin_class})
+            else:
+                input_summary.append({'Parameter': f'Leg {idx} - Date', 'Value': date})
+                input_summary.append({'Parameter': f'Leg {idx} - Time', 'Value': time})
+                input_summary.append({'Parameter': f'Leg {idx} - Class', 'Value': cabin_class})
+
+        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+
+        # Extract traveller information
+        travellers = input_data.get('traveller', [])
+        input_summary.append({'Parameter': 'Number of Travellers', 'Value': len(travellers)})
+        for idx, traveller in enumerate(travellers, 1):
+            name = traveller.get('name', 'N/A')
+            salutation = traveller.get('salutation', 'N/A')
+            input_summary.append({'Parameter': f'Traveller {idx}', 'Value': f"{salutation} {name}"})
+
+        # Extract travel partner information
+        travel_partners = input_data.get('travel_partner', [])
+        if travel_partners:
+            input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+            input_summary.append({'Parameter': 'Travel Partners', 'Value': len(travel_partners)})
+            for idx, partner in enumerate(travel_partners, 1):
+                partner_type = partner.get('type', 'N/A')
+                salutation = partner.get('salutation', '')
+                first_name = partner.get('first_name', 'N/A')
+                last_name = partner.get('last_name', 'N/A')
+                full_name = f"{salutation} {first_name} {last_name}".strip()
+                if partner.get('dob'):
+                    full_name += f" (DOB: {partner['dob']})"
+                input_summary.append({'Parameter': f'Partner {idx} - {partner_type}', 'Value': full_name})
+
+        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+        input_summary.append({'Parameter': '--- Results Summary ---', 'Value': ''})
+        input_summary.append({'Parameter': 'Total Flights Found', 'Value': len(registry)})
+        input_summary.append({'Parameter': 'Selectable Flights', 'Value': len([f for f in registry.values() if f['Selectable']])})
+        input_summary.append({'Parameter': 'MyIDTravel Flights', 'Value': len(myid_all_flights)})
+        input_summary.append({'Parameter': 'Stafftraveler Flights', 'Value': len(staff_all_flights)})
+        input_summary.append({'Parameter': 'Google Flights Results', 'Value': len(google_all_flights)})
+
+        # Build results dictionary
         results = {
-            "Top_5_Overall": get_top_5(eligible_flights),
-            "Top_5_MyIDTravel": get_top_5(eligible_flights),
-            "Top_5_Stafftraveler": get_top_5([f for f in eligible_flights if f['In_Staff']]),
-            "Top_5_Google_Flights": get_top_5([f for f in eligible_flights if f['In_Google']])
+            "Input_Summary": input_summary,
+            "Top_5_Bookable": top_5_bookable,
+            "Top_5_R2_Standby": top_5_standby,
+            "MyIDTravel_All": myid_all_flights,
+            "Stafftraveler_All": staff_all_flights,
+            "Google_Flights_All": google_all_flights
         }
-        
-        # Save to run directory
+
+        # Save JSON output
         json_output = state.output_dir / "standby_report_multi.json"
-        excel_output = state.output_dir / "standby_report_multi.xlsx"
-        
         with open(json_output, 'w') as f:
             json.dump(results, f, indent=4)
-        
+
         state.result_files["standby_report_multi.json"] = json_output
         await state.log(f"[report] Generated {json_output}")
-        
+
         # Generate Excel output
         try:
             import pandas as pd
-            with pd.ExcelWriter(excel_output) as writer:
-                pd.DataFrame(results["Top_5_Overall"]).to_excel(writer, sheet_name='Top 5 Overall', index=False)
-                pd.DataFrame(results["Top_5_MyIDTravel"]).to_excel(writer, sheet_name='MyIDTravel', index=False)
-                pd.DataFrame(results["Top_5_Stafftraveler"]).to_excel(writer, sheet_name='Stafftraveler', index=False)
-                pd.DataFrame(results["Top_5_Google_Flights"]).to_excel(writer, sheet_name='Google Flights', index=False)
-            
+            excel_output = state.output_dir / "standby_report_multi.xlsx"
+
+            with pd.ExcelWriter(excel_output, engine='openpyxl') as writer:
+                # Sheet 1: Input Summary
+                pd.DataFrame(input_summary).to_excel(writer, sheet_name='Input', index=False)
+
+                # Sheet 2: Bookable
+                if top_5_bookable:
+                    pd.DataFrame(top_5_bookable).to_excel(writer, sheet_name='Bookable', index=False)
+
+                # Sheet 3: R2 Standby
+                if top_5_standby:
+                    pd.DataFrame(top_5_standby).to_excel(writer, sheet_name='R2 Standby', index=False)
+
+                # Sheet 4: MyIDTravel All
+                if myid_all_flights:
+                    pd.DataFrame(myid_all_flights).to_excel(writer, sheet_name='MyIDTravel', index=False)
+
+                # Sheet 5: Stafftraveler All
+                if staff_all_flights:
+                    pd.DataFrame(staff_all_flights).to_excel(writer, sheet_name='Stafftraveler', index=False)
+
+                # Sheet 6: Google Flights All
+                if google_all_flights:
+                    pd.DataFrame(google_all_flights).to_excel(writer, sheet_name='Google Flights', index=False)
+
             state.result_files["standby_report_multi.xlsx"] = excel_output
             await state.log(f"[report] Generated {excel_output}")
         except ImportError:
             await state.log("[report] pandas not available, skipping Excel generation")
         except Exception as exc:
             await state.log(f"[report] Excel generation failed: {exc}")
-        
+
         await state.log("[report] Flight loads report generation completed successfully")
-        
+
     except FileNotFoundError as exc:
         await state.log(f"[report] Required JSON files not found: {exc}")
     except json.JSONDecodeError as exc:
@@ -620,6 +1109,32 @@ async def _run_generate_flight_loads(state: RunState) -> None:
     except Exception as exc:
         await state.log(f"[report] Error generating report: {exc}")
 
+
+@app.on_event("startup")
+async def startup_event():
+    """Start Slack bot on application startup"""
+    if SLACK_ENABLED:
+        asyncio.create_task(start_slack_bot())
+    logger.info("FastAPI application started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop Slack bot on application shutdown"""
+    await stop_slack_bot()
+    logger.info("FastAPI application stopped")
+
+@app.get("/api/slack/status")
+async def slack_status():
+    """Check if Slack integration is enabled and connected"""
+    return {
+        "enabled": SLACK_ENABLED,
+        "connected": slack_connected,
+        "commands": [
+            "run scraper [origin] [destination] [date]",
+            "scraper status"
+        ]
+    }
 
 @app.websocket("/ws/{run_id}")
 async def logs_ws(websocket: WebSocket, run_id: str):
