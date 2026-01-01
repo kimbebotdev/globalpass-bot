@@ -18,6 +18,24 @@ const addFlightBtn = document.getElementById("add-flight");
 const legsContainer = document.getElementById("legs-container");
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
 const timeOptions = Array.from({ length: 24 }, (_, h) => `${h.toString().padStart(2, "0")}:00`);
+const isoToMmddyyyy = (val) => {
+  if (!val) return "";
+  if (val.includes("/")) return val;
+  const parts = val.split("-");
+  if (parts.length === 3) {
+    return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${parts[0]}`;
+  }
+  return val;
+};
+const mmddyyyyToIso = (val) => {
+  if (!val) return "";
+  if (val.includes("-")) return val;
+  const parts = val.split("/");
+  if (parts.length === 3) {
+    return `${parts[2]}-${parts[0].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+  }
+  return val;
+};
 
 let ws;
 let currentRunId = null;
@@ -243,7 +261,7 @@ function renderLegs() {
     grid.appendChild(
       makeInput("Destination", leg.destination, "e.g. SIN", (val) => (leg.destination = val))
     );
-    grid.appendChild(makeInput("Date", leg.date, "", (val) => (leg.date = val), "date"));
+    grid.appendChild(makeDateInput(leg));
     grid.appendChild(makeTimeSelect(leg));
     grid.appendChild(makeClassSelect(leg));
 
@@ -260,6 +278,19 @@ function makeInput(labelText, value, placeholder, onChange, type = "text") {
   input.placeholder = placeholder;
   input.value = value || "";
   input.addEventListener("input", (e) => onChange(e.target.value));
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function makeDateInput(leg) {
+  const wrap = document.createElement("label");
+  wrap.textContent = "Date";
+  const input = document.createElement("input");
+  input.type = "date";
+  input.value = leg.date ? mmddyyyyToIso(leg.date) : "";
+  input.addEventListener("change", (e) => {
+    leg.date = isoToMmddyyyy(e.target.value);
+  });
   wrap.appendChild(input);
   return wrap;
 }
@@ -291,6 +322,9 @@ function makeTimeSelect(leg) {
     select.appendChild(option);
   });
   select.value = leg.time || timeOptions[0];
+  if (!leg.time) {
+    leg.time = select.value;
+  }
   select.addEventListener("change", (e) => (leg.time = e.target.value));
   wrap.appendChild(select);
   return wrap;
