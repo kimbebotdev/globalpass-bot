@@ -40,6 +40,10 @@
         {
           "origin": "DXB",
           "destination": "SIN"
+        },
+        {
+          "origin": "SIN",
+          "destination": "DXB"
         }
       ],
       "itinerary": [
