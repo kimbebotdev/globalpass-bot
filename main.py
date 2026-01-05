@@ -260,58 +260,6 @@ class RunState:
         self.slack_channel: Optional[str] = None
         self.slack_thread_ts: Optional[str] = None
 
-    async def push_status(self) -> None:
-        payload = {
-            "type": "status",
-            "status": self.status,
-            "error": self.error,
-            "run_id": self.id,
-        }
-        if self.completed_at:
-            payload["completed_at"] = self.completed_at.isoformat()
-        await self._broadcast(payload, store=False)
-
-        # Send Slack notification if this run was triggered from Slack
-        if self.slack_channel and self.slack_thread_ts and slack_web_client:
-            await self._send_slack_status_update()
-
-    async def _send_slack_status_update(self):
-        """Send status update to Slack thread"""
-        try:
-            if self.status == "completed":
-                # Build file links
-                route = "N/A"
-                if self.input_data.get("trips"):
-                    trip = self.input_data["trips"][0]
-                    route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
-
-                message = (
-                    f"*Scraper Completed!*\n"
-                    f"Run ID: `{self.id}`\n"
-                    f"Route: {route}\n"
-                    f"Files generated:\n"
-                )
-
-                for file_key, file_path in self.result_files.items():
-                    if file_path.exists():
-                        message += f"• {file_key}\n"
-
-                message += f"\nDownload results at: `{self.output_dir}`"
-
-            elif self.status == "error":
-                message = f"*Scraper Failed*\nRun ID: `{self.id}`\nError: {self.error}"
-            else:
-                return  # Don't send updates for pending/running status
-
-            slack_web_client.chat_postMessage(
-                channel=self.slack_channel,
-                thread_ts=self.slack_thread_ts,
-                text=message
-            )
-
-        except Exception as e:
-            logger.error(f"Error sending Slack notification: {e}")
-
     def subscribe(self, ws: WebSocket) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
         self.subscribers[ws] = queue
@@ -341,6 +289,7 @@ class RunState:
         await self._broadcast(payload, store=True)
 
     async def push_status(self) -> None:
+        """Push status update to WebSocket subscribers and Slack"""
         payload = {
             "type": "status",
             "status": self.status,
@@ -351,6 +300,62 @@ class RunState:
             payload["completed_at"] = self.completed_at.isoformat()
         await self._broadcast(payload, store=False)
 
+        # Send Slack notification if this run was triggered from Slack
+        if self.slack_channel and self.slack_thread_ts and slack_web_client:
+            logger.info(
+                "Sending Slack status update for run %s (status=%s) to channel %s thread %s",
+                self.id,
+                self.status,
+                self.slack_channel,
+                self.slack_thread_ts,
+            )
+            await self._send_slack_status_update()
+        else:
+            logger.debug(
+                "Skipping Slack status update for run %s (channel=%s thread=%s client=%s)",
+                self.id,
+                self.slack_channel,
+                self.slack_thread_ts,
+                bool(slack_web_client),
+            )
+
+    async def _send_slack_status_update(self):
+        """Send status update to Slack thread"""
+        try:
+            if self.status == "completed":
+                # Build file links
+                route = "N/A"
+                if self.input_data.get("trips"):
+                    trip = self.input_data["trips"][0]
+                    route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+
+                message = (
+                    f"*Scraper Completed!*\n"
+                    f"Run ID: `{self.id}`\n"
+                    f"Route: {route}\n"
+                    f"Files generated:\n"
+                )
+
+                for file_key, file_path in self.result_files.items():
+                    if file_path.exists():
+                        message += f"• {file_key}\n"
+
+                message += f"\nDownload results at: `{self.output_dir}`"
+
+            elif self.status == "error":
+                message = f"*Scraper Failed*\nRun ID: `{self.id}`\nError: {self.error}"
+            else:
+                return  # Don't send updates for pending/running status
+
+            await slack_web_client.chat_postMessage(
+                channel=self.slack_channel,
+                thread_ts=self.slack_thread_ts,
+                text=message
+            )
+            logger.info("Successfully sent Slack notification for run %s", self.id)
+
+        except Exception as e:
+            logger.error("Error sending Slack notification for run %s: %s", self.id, e, exc_info=True)
 
 @contextmanager
 def patch_config(attr: str, value: Any):
@@ -730,102 +735,138 @@ async def scrape_airlines_task(
 
 async def _run_generate_flight_loads(state: RunState) -> None:
     """
-    Generate standby_report_multi.* using the three bot outputs.
-    Implements the scoring formula from generate-flights.py with separate logic
-    for Bookable and R2 Standby status.
+    Generate standby_report_multi.* using available data with fallback handling.
+    Works even if one or more JSON sources are missing.
+    Uses 'chance' as proxy for load since exact seat counts unavailable.
     """
     await state.log("[report] Starting flight loads report generation...")
 
     try:
-        # Load all sources directly from run directory
+        # Load sources with fallback to empty data
+        myid_data = {}
+        google_data = []
+        staff_data = []
+
         myid_path = state.result_files.get("myidtravel")
         google_path = state.result_files.get("google_flights")
         staff_path = state.result_files.get("stafftraveler")
 
-        if not all([myid_path, google_path, staff_path]):
-            await state.log("[report] Missing required input files, skipping report generation")
+        # Load MyIDTravel (most critical source)
+        if myid_path and myid_path.exists():
+            try:
+                with open(myid_path, 'r') as f:
+                    myid_data = json.load(f)
+                await state.log("[report] Loaded MyIDTravel data")
+            except Exception as e:
+                await state.log(f"[report] Failed to load MyIDTravel: {e}")
+        else:
+            await state.log("[report] MyIDTravel data not available")
+
+        # Load Google Flights
+        if google_path and google_path.exists():
+            try:
+                with open(google_path, 'r') as f:
+                    google_data = json.load(f)
+                await state.log("[report] Loaded Google Flights data")
+            except Exception as e:
+                await state.log(f"[report] Failed to load Google Flights: {e}")
+        else:
+            await state.log("[report] Google Flights data not available")
+
+        # Load StaffTraveler
+        if staff_path and staff_path.exists():
+            try:
+                with open(staff_path, 'r') as f:
+                    staff_data = json.load(f)
+                await state.log("[report] Loaded StaffTraveler data")
+            except Exception as e:
+                await state.log(f"[report] Failed to load StaffTraveler: {e}")
+        else:
+            await state.log("[report] StaffTraveler data not available")
+
+        # If no data at all, cannot proceed
+        if not myid_data and not staff_data and not google_data:
+            await state.log("[report] No data available from any source")
             return
-
-        # Load JSON data
-        with open(myid_path, 'r') as f:
-            myid_data = json.load(f)
-        with open(google_path, 'r') as f:
-            google_data = json.load(f)
-        with open(staff_path, 'r') as f:
-            staff_data = json.load(f)
-
-        await state.log("[report] Loaded all input files successfully")
-
-        # Extract input data for summary
-        input_data = state.input_data
 
         # Build flight registry
         registry = {}
 
-        # 1. Process Stafftraveler data
-        for entry in staff_data:
-            for f in entry.get('flight_details', []):
-                fn = f['airline_flight_number']
-                registry[fn] = {
-                    'Flight': fn,
-                    'Airline': f['airlines'],
-                    'Aircraft': f.get('aircraft', 'N/A'),
-                    'Departure': f.get('departure_time', 'N/A'),
-                    'Arrival': f.get('arrival_time', 'N/A'),
-                    'Duration': to_minutes(f.get('duration', '0h 0m')),
-                    'Duration_Str': f.get('duration', 'N/A'),
-                    'Stops': 0,
-                    'Selectable': False,
-                    'Chance': 'Unknown',
-                    'Price': 32000,
-                    'Sources': {'Stafftraveler'}
-                }
-
-        # 2. Process MyIDTravel data
+        # 1. Process MyIDTravel (primary source for availability)
         for routing in myid_data.get('routings', []):
             for f in routing.get('flights', []):
                 seg = f['segments'][0]
                 fn = seg['flightNumber']
 
-                if fn not in registry:
-                    registry[fn] = {
-                        'Flight': fn,
-                        'Airline': seg['operatingAirline']['name'],
-                        'Aircraft': seg.get('aircraft', 'N/A'),
-                        'Departure': seg['departureTime'],
-                        'Arrival': seg['arrivalTime'],
-                        'Duration': to_minutes(f.get('duration', '0h 0m')),
-                        'Duration_Str': f.get('duration', 'N/A'),
-                        'Stops': f.get('stopQuantity', 0),
-                        'Price': 32000,
-                        'Sources': set()
-                }
-
-                registry[fn]['Sources'].add('MyIDTravel')
-                registry[fn].update({
-                    'Selectable': f.get('selectable', False),
-                    'Chance': f.get('chance', 'Unknown'),
+                registry[fn] = {
+                    'Flight': fn,
+                    'Airline': seg['operatingAirline']['name'],
+                    'Aircraft': seg.get('aircraft', 'N/A'),
                     'Departure': seg['departureTime'],
                     'Arrival': seg['arrivalTime'],
-                })
+                    'Duration': to_minutes(f.get('duration', '0h 0m')),
+                    'Duration_Str': f.get('duration', 'N/A'),
+                    'Stops': seg.get('stopQuantity', 0),
+                    'Selectable': f.get('selectable', False),
+                    'Chance': f.get('chance', 'Unknown'),
+                    'Tarif': f.get('tarif', 'Unknown'),
+                    'Price': None,  # Will be set from Google
+                    'Sources': {'MyIDTravel'}
+                }
 
-        # 3. Process Google Flights data
+        # 2. Process StaffTraveler
+        for entry in staff_data:
+            for f in entry.get('flight_details', []):
+                fn = f['airline_flight_number']
+
+                if fn not in registry:
+                    # Create new entry if not in MyIDTravel
+                    registry[fn] = {
+                        'Flight': fn,
+                        'Airline': f['airlines'],
+                        'Aircraft': f.get('aircraft', 'N/A'),
+                        'Departure': 'N/A',
+                        'Arrival': 'N/A',
+                        'Duration': to_minutes(f.get('duration', '0h 0m')),
+                        'Duration_Str': f.get('duration', 'N/A'),
+                        'Stops': 0,
+                        'Selectable': False,  # Unknown without MyIDTravel
+                        'Chance': 'Unknown',
+                        'Tarif': 'Unknown',
+                        'Price': None,
+                        'Sources': set()
+                    }
+
+                registry[fn]['Sources'].add('Stafftraveler')
+
+                # Update timing info if missing
+                if registry[fn]['Departure'] == 'N/A':
+                    time_parts = f.get('time', '').split(' - - - ')
+                    if len(time_parts) == 2:
+                        registry[fn]['Departure'] = time_parts[0].strip()
+                        registry[fn]['Arrival'] = time_parts[1].strip()
+
+        # 3. Process Google Flights for pricing
         for entry in google_data:
             flights_data = entry.get('flights', {})
-            all_google_flights = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+            all_google = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
 
-            for g_f in all_google_flights:
+            for g_f in all_google:
                 import re
-                price_str = g_f.get('price', '') or g_f.get('summary', '')
-                price_match = re.search(r'(\d+)', price_str.replace(',', '').replace('₱', ''))
-                price = int(price_match.group(1)) if price_match else 32000
 
-                # Try to extract flight number
+                # Extract price
+                price_str = g_f.get('price', '') or g_f.get('summary', '')
+                price_match = re.search(r'(\d[\d,]*)', price_str.replace('₱', '').replace(' ', ''))
+                price = int(price_match.group(1).replace(',', '')) if price_match else None
+
+                # Extract flight number from summary
                 fn_match = re.search(r'\b([A-Z]{2,3}\d{1,4})\b', g_f.get('summary', ''))
                 fn = fn_match.group(1) if fn_match else None
 
+                # Match by flight number if found
                 if fn and fn in registry:
-                    registry[fn]['Price'] = price
+                    if registry[fn]['Price'] is None or (price and price < registry[fn]['Price']):
+                        registry[fn]['Price'] = price
                     registry[fn]['Sources'].add('Google Flights')
                 else:
                     # Fallback: match by airline and duration
@@ -833,30 +874,109 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                     g_duration = to_minutes(g_f.get('duration', '0h 0m'))
 
                     for reg_fn, data in registry.items():
-                        if data['Airline'] == g_airline and abs(data['Duration'] - g_duration) <= 5:
-                            data['Price'] = price
+                        if (data['Airline'] == g_airline and
+                            abs(data['Duration'] - g_duration) <= 5):
+                            if data['Price'] is None or (price and price < data['Price']):
+                                data['Price'] = price
                             data['Sources'].add('Google Flights')
                             break
 
         await state.log(f"[report] Built registry with {len(registry)} flights")
 
+        # Set default price for flights without Google data
+        DEFAULT_PRICE = 32000
+        for fn, f in registry.items():
+            if f['Price'] is None:
+                f['Price'] = DEFAULT_PRICE
+
         # Calculate minimum duration for scoring
         valid_durations = [f['Duration'] for f in registry.values() if f['Duration'] > 0]
-        min_dur = min(valid_durations) if valid_durations else 1
+        min_dur = min(valid_durations) if valid_durations else 420  # 7 hours default
 
-        # Generate rankings for R2 Standby
+        def calculate_standby_load_score(f):
+            """
+            Calculate load score based on available data.
+            Since exact seat counts unavailable, use Chance as load proxy:
+            - HIGH chance = low load (easy to get on)
+            - MEDIUM chance = medium load (competitive)
+            - LOW chance = high load (difficult to get on)
+
+            Scoring prioritizes:
+            1. Chance/Load (most important)
+            2. Nonstop flights
+            3. Shorter duration
+            4. Tarif level (MID > HIGH)
+            """
+
+            # Map chance to load score (higher is better for boarding)
+            chance_map = {
+                'HIGH': 1000,      # Excellent availability
+                'MEDIUM': 600,     # Moderate availability
+                'MID': 600,        # Same as MEDIUM
+                'LOW': 200,        # Poor availability
+                'Unknown': 0       # No data
+            }
+            load_score = chance_map.get(f['Chance'], 0)
+
+            # Nonstop bonus (significant factor)
+            nonstop_bonus = 300 if f['Stops'] == 0 else 0
+
+            # Duration bonus (prefer shorter flights)
+            duration_bonus = (min_dur / f['Duration']) * 150 if f['Duration'] > 0 else 0
+
+            # Tarif bonus (MID tariff is better than HIGH for standby)
+            tarif_map = {'MID': 100, 'HIGH': 50, 'LOW': 150, 'Unknown': 0}
+            tarif_bonus = tarif_map.get(f['Tarif'], 0)
+
+            total = load_score + nonstop_bonus + duration_bonus + tarif_bonus
+            return total
+
+        def calculate_bookable_score(f):
+            """
+            Calculate score for bookable flights.
+            Prioritizes:
+            1. Price (lower is better)
+            2. Aircraft comfort (A380/777 preferred)
+            3. Nonstop flights
+            4. Duration
+            """
+
+            # Price score (lower price = higher score)
+            if f['Price'] > 0:
+                # Normalize: 10000 PHP baseline, max 1000 points
+                price_score = min(1000, (15000 / f['Price']) * 1000)
+            else:
+                price_score = 0
+
+            # Aircraft comfort bonus
+            comfort_bonus = 0
+            if 'A380' in f['Aircraft'] or '388' in f['Aircraft']:
+                comfort_bonus = 250  # A380 is most comfortable
+            elif '777' in f['Aircraft'] or '77W' in f['Aircraft'] or 'B773' in f['Aircraft']:
+                comfort_bonus = 150  # 777 is also comfortable
+
+            # Nonstop bonus
+            nonstop_bonus = 200 if f['Stops'] == 0 else 0
+
+            # Duration bonus
+            duration_bonus = (min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0
+
+            total = price_score + comfort_bonus + nonstop_bonus + duration_bonus
+            return total
+
+        # Generate R2 Standby rankings (load-based)
         standby_flights = []
+        low_load_alerts = []
+
         for fn, f in registry.items():
+            # Only include selectable flights for standby ranking
             if not f['Selectable']:
                 continue
 
-            chance_map = {'HIGH': 500, 'MEDIUM': 300, 'MID': 300, 'LOW': 100, 'Unknown': 0}
-            score = (chance_map.get(f['Chance'], 0)) + \
-                    (1000 if f['Stops'] == 0 else 0) + \
-                    ((min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0)
+            score = calculate_standby_load_score(f)
 
-            standby_flights.append({
-                'Flight': f['Flight'],
+            flight_info = {
+                'Flight': fn,
                 'Airline': f['Airline'],
                 'Aircraft': f['Aircraft'],
                 'Departure': f['Departure'],
@@ -864,14 +984,35 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Duration': f['Duration_Str'],
                 'Stops': f['Stops'],
                 'Chance': f['Chance'],
+                'Tarif': f['Tarif'],
                 'Source': ', '.join(sorted(list(f['Sources']))),
                 'Score': round(score, 2)
-            })
+            }
 
+            standby_flights.append(flight_info)
+
+            # Alert if chance is LOW (high load, poor availability)
+            if f['Chance'] == 'LOW':
+                low_load_alerts.append(
+                    f"⚠️  {fn} ({f['Airline']}) - LOW availability (high load)"
+                )
+
+        # Sort by score (highest = best load/availability)
         standby_flights.sort(key=lambda x: x['Score'], reverse=True)
+
+        # Log alerts
+        if low_load_alerts:
+            for alert in low_load_alerts:
+                await state.log(f"[ALERT] {alert}")
+
+        # If no selectable flights found
+        if not standby_flights:
+            await state.log("[ALERT]️ No selectable standby flights found!")
+
+        # Top 5 R2 Standby
         top_5_standby = []
         for i, item in enumerate(standby_flights[:5], 1):
-            ranked_item = {
+            ranked = {
                 'Rank': i,
                 'Flight': item['Flight'],
                 'Airline': item['Airline'],
@@ -883,21 +1024,19 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Chance': item['Chance'],
                 'Source': item['Source']
             }
-            top_5_standby.append(ranked_item)
+            top_5_standby.append(ranked)
 
-        # Generate rankings for Bookable
+        # Bookable flights ranking
         bookable_flights = []
         for fn, f in registry.items():
-            if not f['Selectable']:
+            # Include all flights with pricing for bookable
+            if f['Price'] is None or f['Price'] <= 0:
                 continue
 
-            comfort_bonus = 200 if "A380" in f['Aircraft'] else 0
-            price_score = 1000 * (10000 / f['Price']) if f['Price'] > 0 else 0
-            score = price_score + comfort_bonus + \
-                    ((min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0)
+            score = calculate_bookable_score(f)
 
             bookable_flights.append({
-                'Flight': f['Flight'],
+                'Flight': fn,
                 'Airline': f['Airline'],
                 'Aircraft': f['Aircraft'],
                 'Departure': f['Departure'],
@@ -910,9 +1049,10 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             })
 
         bookable_flights.sort(key=lambda x: x['Score'], reverse=True)
+
         top_5_bookable = []
         for i, item in enumerate(bookable_flights[:5], 1):
-            ranked_item = {
+            ranked = {
                 'Rank': i,
                 'Flight': item['Flight'],
                 'Airline': item['Airline'],
@@ -924,7 +1064,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Price': item['Price'],
                 'Source': item['Source']
             }
-            top_5_bookable.append(ranked_item)
+            top_5_bookable.append(ranked)
 
         # Prepare data for all source sheets
         myid_all_flights = []
@@ -938,8 +1078,9 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                     'Departure': seg['departureTime'],
                     'Arrival': seg['arrivalTime'],
                     'Duration': f.get('duration', 'N/A'),
-                    'Stops': f.get('stopQuantity', 0),
+                    'Stops': seg.get('stopQuantity', 0),
                     'Chance': f.get('chance', 'N/A'),
+                    'Tarif': f.get('tarif', 'N/A'),
                     'Selectable': 'YES' if f.get('selectable', False) else 'NO'
                 })
 
@@ -950,8 +1091,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                     'Flight': f['airline_flight_number'],
                     'Airline': f['airlines'],
                     'Aircraft': f.get('aircraft', 'N/A'),
-                    'Departure': f.get('departure_time', 'N/A'),
-                    'Arrival': f.get('arrival_time', 'N/A'),
+                    'Time': f.get('time', 'N/A'),
                     'Duration': f.get('duration', 'N/A')
                 })
 
@@ -963,82 +1103,57 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 google_all_flights.append({
                     'Airline': g_f.get('airline', 'N/A'),
                     'Departure': g_f.get('depart_time', 'N/A'),
-                    'Arrival': g_f.get('arrive_time', 'N/A'),
+                    'Arrival': g_f.get('arrival_time', 'N/A'),
                     'Duration': g_f.get('duration', 'N/A'),
+                    'Stops': g_f.get('stops', 'N/A'),
                     'Price': g_f.get('price', 'N/A'),
-                    'Summary': g_f.get('summary', 'N/A')
+                    'Emissions': g_f.get('emissions', 'N/A')
                 })
 
-        # Prepare input summary from the actual endpoint input
+        # Prepare input summary
+        input_data = state.input_data
         input_summary = []
 
-        # Extract basic search parameters
-        flight_type = input_data.get('flight_type', 'N/A')
-        nonstop_flights = 'Yes' if input_data.get('nonstop_flights', False) else 'No'
-        airline = input_data.get('airline', 'All Airlines') or 'All Airlines'
-        travel_status = input_data.get('travel_status', 'N/A')
+        # Basic parameters
+        input_summary.append({'Parameter': 'Flight Type', 'Value': input_data.get('flight_type', 'N/A')})
+        input_summary.append({'Parameter': 'Nonstop Only', 'Value': 'Yes' if input_data.get('nonstop_flights', False) else 'No'})
+        input_summary.append({'Parameter': 'Airline', 'Value': input_data.get('airline', 'All Airlines') or 'All Airlines'})
+        input_summary.append({'Parameter': 'Travel Status', 'Value': input_data.get('travel_status', 'N/A')})
+        input_summary.append({'Parameter': '', 'Value': ''})
 
-        input_summary.append({'Parameter': 'Flight Type', 'Value': flight_type})
-        input_summary.append({'Parameter': 'Nonstop Only', 'Value': nonstop_flights})
-        input_summary.append({'Parameter': 'Airline', 'Value': airline})
-        input_summary.append({'Parameter': 'Travel Status', 'Value': travel_status})
-        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
-
-        # Extract trip information
+        # Trip information
         trips = input_data.get('trips', [])
         for idx, trip in enumerate(trips, 1):
-            origin = trip.get('origin', 'N/A')
-            destination = trip.get('destination', 'N/A')
             if len(trips) == 1:
-                input_summary.append({'Parameter': 'Origin', 'Value': origin})
-                input_summary.append({'Parameter': 'Destination', 'Value': destination})
+                input_summary.append({'Parameter': 'Origin', 'Value': trip.get('origin', 'N/A')})
+                input_summary.append({'Parameter': 'Destination', 'Value': trip.get('destination', 'N/A')})
             else:
-                input_summary.append({'Parameter': f'Trip {idx} - Origin', 'Value': origin})
-                input_summary.append({'Parameter': f'Trip {idx} - Destination', 'Value': destination})
+                input_summary.append({'Parameter': f'Trip {idx} - Origin', 'Value': trip.get('origin', 'N/A')})
+                input_summary.append({'Parameter': f'Trip {idx} - Destination', 'Value': trip.get('destination', 'N/A')})
+        input_summary.append({'Parameter': '', 'Value': ''})
 
-        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
-
-        # Extract itinerary information
+        # Itinerary
         itinerary = input_data.get('itinerary', [])
         for idx, itin in enumerate(itinerary, 1):
-            date = itin.get('date', 'N/A')
-            time = itin.get('time', 'N/A')
-            cabin_class = itin.get('class', 'N/A')
             if len(itinerary) == 1:
-                input_summary.append({'Parameter': 'Date', 'Value': date})
-                input_summary.append({'Parameter': 'Time', 'Value': time})
-                input_summary.append({'Parameter': 'Class', 'Value': cabin_class})
+                input_summary.append({'Parameter': 'Date', 'Value': itin.get('date', 'N/A')})
+                input_summary.append({'Parameter': 'Time', 'Value': itin.get('time', 'N/A')})
+                input_summary.append({'Parameter': 'Class', 'Value': itin.get('class', 'N/A')})
             else:
-                input_summary.append({'Parameter': f'Leg {idx} - Date', 'Value': date})
-                input_summary.append({'Parameter': f'Leg {idx} - Time', 'Value': time})
-                input_summary.append({'Parameter': f'Leg {idx} - Class', 'Value': cabin_class})
+                input_summary.append({'Parameter': f'Leg {idx} - Date', 'Value': itin.get('date', 'N/A')})
+                input_summary.append({'Parameter': f'Leg {idx} - Time', 'Value': itin.get('time', 'N/A')})
+                input_summary.append({'Parameter': f'Leg {idx} - Class', 'Value': itin.get('class', 'N/A')})
+        input_summary.append({'Parameter': '', 'Value': ''})
 
-        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
-
-        # Extract traveller information
+        # Travellers
         travellers = input_data.get('traveller', [])
         input_summary.append({'Parameter': 'Number of Travellers', 'Value': len(travellers)})
         for idx, traveller in enumerate(travellers, 1):
-            name = traveller.get('name', 'N/A')
-            salutation = traveller.get('salutation', 'N/A')
-            input_summary.append({'Parameter': f'Traveller {idx}', 'Value': f"{salutation} {name}"})
+            name = f"{traveller.get('salutation', '')} {traveller.get('name', 'N/A')}".strip()
+            input_summary.append({'Parameter': f'Traveller {idx}', 'Value': name})
+        input_summary.append({'Parameter': '', 'Value': ''})
 
-        # Extract travel partner information
-        travel_partners = input_data.get('travel_partner', [])
-        if travel_partners:
-            input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
-            input_summary.append({'Parameter': 'Travel Partners', 'Value': len(travel_partners)})
-            for idx, partner in enumerate(travel_partners, 1):
-                partner_type = partner.get('type', 'N/A')
-                salutation = partner.get('salutation', '')
-                first_name = partner.get('first_name', 'N/A')
-                last_name = partner.get('last_name', 'N/A')
-                full_name = f"{salutation} {first_name} {last_name}".strip()
-                if partner.get('dob'):
-                    full_name += f" (DOB: {partner['dob']})"
-                input_summary.append({'Parameter': f'Partner {idx} - {partner_type}', 'Value': full_name})
-
-        input_summary.append({'Parameter': '', 'Value': ''})  # Blank row
+        # Results summary
         input_summary.append({'Parameter': '--- Results Summary ---', 'Value': ''})
         input_summary.append({'Parameter': 'Total Flights Found', 'Value': len(registry)})
         input_summary.append({'Parameter': 'Selectable Flights', 'Value': len([f for f in registry.values() if f['Selectable']])})
@@ -1046,17 +1161,18 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         input_summary.append({'Parameter': 'Stafftraveler Flights', 'Value': len(staff_all_flights)})
         input_summary.append({'Parameter': 'Google Flights Results', 'Value': len(google_all_flights)})
 
-        # Build results dictionary
+        # Build results
         results = {
             "Input_Summary": input_summary,
             "Top_5_Bookable": top_5_bookable,
             "Top_5_R2_Standby": top_5_standby,
+            "Alerts": low_load_alerts,
             "MyIDTravel_All": myid_all_flights,
             "Stafftraveler_All": staff_all_flights,
             "Google_Flights_All": google_all_flights
         }
 
-        # Save JSON output
+        # Save JSON
         json_output = state.output_dir / "standby_report_multi.json"
         with open(json_output, 'w') as f:
             json.dump(results, f, indent=4)
@@ -1064,51 +1180,52 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         state.result_files["standby_report_multi.json"] = json_output
         await state.log(f"[report] Generated {json_output}")
 
-        # Generate Excel output
+        # Generate Excel
         try:
             import pandas as pd
             excel_output = state.output_dir / "standby_report_multi.xlsx"
 
             with pd.ExcelWriter(excel_output, engine='openpyxl') as writer:
-                # Sheet 1: Input Summary
                 pd.DataFrame(input_summary).to_excel(writer, sheet_name='Input', index=False)
 
-                # Sheet 2: Bookable
                 if top_5_bookable:
                     pd.DataFrame(top_5_bookable).to_excel(writer, sheet_name='Bookable', index=False)
 
-                # Sheet 3: R2 Standby
                 if top_5_standby:
                     pd.DataFrame(top_5_standby).to_excel(writer, sheet_name='R2 Standby', index=False)
 
-                # Sheet 4: MyIDTravel All
                 if myid_all_flights:
                     pd.DataFrame(myid_all_flights).to_excel(writer, sheet_name='MyIDTravel', index=False)
 
-                # Sheet 5: Stafftraveler All
                 if staff_all_flights:
                     pd.DataFrame(staff_all_flights).to_excel(writer, sheet_name='Stafftraveler', index=False)
 
-                # Sheet 6: Google Flights All
                 if google_all_flights:
                     pd.DataFrame(google_all_flights).to_excel(writer, sheet_name='Google Flights', index=False)
+
+                if low_load_alerts:
+                    alerts_df = pd.DataFrame({'Alert': low_load_alerts})
+                    alerts_df.to_excel(writer, sheet_name='Alerts', index=False)
 
             state.result_files["standby_report_multi.xlsx"] = excel_output
             await state.log(f"[report] Generated {excel_output}")
         except ImportError:
-            await state.log("[report] pandas not available, skipping Excel generation")
+            await state.log("[report] Pandas not available, skipping Excel")
         except Exception as exc:
             await state.log(f"[report] Excel generation failed: {exc}")
 
-        await state.log("[report] Flight loads report generation completed successfully")
+        # Summary logs
+        await state.log(f"[report] Report complete:")
+        await state.log(f"  - Total flights: {len(registry)}")
+        await state.log(f"  - Top 5 Standby (Plan A-E): {len(top_5_standby)}")
+        await state.log(f"  - Top 5 Bookable: {len(top_5_bookable)}")
+        if low_load_alerts:
+            await state.log(f"  -️  {len(low_load_alerts)} low availability alerts")
 
-    except FileNotFoundError as exc:
-        await state.log(f"[report] Required JSON files not found: {exc}")
-    except json.JSONDecodeError as exc:
-        await state.log(f"[report] JSON parsing error: {exc}")
     except Exception as exc:
-        await state.log(f"[report] Error generating report: {exc}")
-
+        await state.log(f"[report] Error: {exc}")
+        import traceback
+        await state.log(f"[report] {traceback.format_exc()}")
 
 @app.on_event("startup")
 async def startup_event():
