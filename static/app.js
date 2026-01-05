@@ -169,7 +169,7 @@ async function fetchResults(runId) {
   try {
     const res = await fetch(`/api/runs/${runId}`);
     const data = await res.json();
-    renderReport(data.report);
+    buildReportTabs(data.report);
     fileList.innerHTML = "";
     if (data.files) {
       Object.entries(data.files).forEach(([name, path]) => {
@@ -204,23 +204,7 @@ async function download(kind) {
 }
 
 function renderReport(report) {
-  if (!report || !report.Top_5_Overall || !report.Top_5_Overall.length) {
-    resultsBlock.textContent = "Report not available yet.";
-    return;
-  }
-  const top = report.Top_5_Overall.slice(0, 5);
-  const rows = top
-    .map(
-      (item) => `
-      <div class="chip">
-        #${item.Rank} ${item.Flight} · ${item.Airline} · Dep ${item.Departure} · Arr ${item.Arrival} · Chance ${item.Chance} · Score ${item.Score}
-      </div>`
-    )
-    .join("");
-  resultsBlock.innerHTML = `
-    <div><strong>Top 5 Overall</strong></div>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${rows}</div>
-  `;
+  // Deprecated by tab view
 }
 
 function renderLegs() {
@@ -330,6 +314,99 @@ function makeTimeSelect(leg) {
   return wrap;
 }
 
+function buildReportTabs(report) {
+  const tabsContainer = document.getElementById("report-tabs");
+  tabsContainer.innerHTML = "";
+  if (!report || typeof report !== "object") {
+    resultsBlock.textContent = "Report not available yet.";
+    return;
+  }
+
+  const sheets = Object.keys(report)
+    .filter((key) => Array.isArray(report[key]) && report[key].length)
+    .filter((key) => key !== "Input_Summary");
+  if (!sheets.length) {
+    resultsBlock.textContent = "Report not available yet.";
+    return;
+  }
+
+  let active = sheets[0];
+
+  const renderSheet = (sheetName) => {
+    const rows = report[sheetName] || [];
+    if (!rows.length) {
+      resultsBlock.textContent = "No data for " + sheetName;
+      return;
+    }
+    const headers = Object.keys(rows[0]);
+    resultsBlock.innerHTML = `
+      <div><strong>${sheetName.replace(/_/g, " ").replace(/ All$/i, "")}</strong></div>
+      <div style="overflow-x:auto;margin-top:8px;">
+        <table class="data-table" id="data-table">
+          <thead>
+            <tr>${headers.map((h) => `<th data-key="${h}">${h}</th>`).join("")}</tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) =>
+                  `<tr>${headers.map((h) => `<td>${row[h] ?? ""}</td>`).join("")}</tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+    enableSort("data-table");
+  };
+
+  sheets.forEach((name) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab" + (name === active ? " active" : "");
+    btn.textContent = name.replace(/_/g, " ");
+    btn.addEventListener("click", () => {
+      active = name;
+      document.querySelectorAll(".tab").forEach((el) => el.classList.remove("active"));
+      btn.classList.add("active");
+      renderSheet(name);
+    });
+    tabsContainer.appendChild(btn);
+  });
+
+  renderSheet(active);
+}
+
+function enableSort(tableId) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const headers = table.querySelectorAll("th");
+  headers.forEach((th, idx) => {
+    th.addEventListener("click", () => {
+      const rows = Array.from(table.querySelectorAll("tbody tr"));
+      const asc = th.classList.toggle("asc");
+      headers.forEach((h) => {
+        if (h !== th) h.classList.remove("asc", "desc");
+      });
+      th.classList.toggle("desc", !asc);
+      rows.sort((a, b) => {
+        const av = a.children[idx].textContent || "";
+        const bv = b.children[idx].textContent || "";
+        const na = parseFloat(av.replace(/[^\d.-]/g, ""));
+        const nb = parseFloat(bv.replace(/[^\d.-]/g, ""));
+        const aNum = !isNaN(na);
+        const bNum = !isNaN(nb);
+        if (aNum && bNum) {
+          return asc ? na - nb : nb - na;
+        }
+        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+      });
+      const tbody = table.querySelector("tbody");
+      rows.forEach((row) => tbody.appendChild(row));
+    });
+  });
+}
+
 function ensureLegsMatchType() {
   const type = flightTypeSelect.value;
   if (type === "one-way") {
@@ -404,8 +481,8 @@ fileInput.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-downloadJsonBtn.addEventListener("click", () => download("json"));
-downloadXlsxBtn.addEventListener("click", () => download("excel"));
+downloadJsonBtn.addEventListener("click", () => download("report_json"));
+downloadXlsxBtn.addEventListener("click", () => download("report_excel"));
 form.addEventListener("submit", startRun);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
 addFlightBtn.addEventListener("click", () => {

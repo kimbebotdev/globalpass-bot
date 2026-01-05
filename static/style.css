@@ -436,6 +436,45 @@ button:disabled {
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
+/* Table tuned for gray container background */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: rgba(30, 32, 36, 0.95);
+  color: #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* Header + cells */
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  text-align: left;
+}
+
+/* Header */
+.data-table thead th {
+  background: rgba(255, 255, 255, 0.07);
+  color: #f9fafb;
+  font-weight: 500;
+}
+
+/* Rows */
+.data-table tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.data-table tbody tr:hover td {
+  background: rgba(34, 211, 238, 0.1);
+}
+
+.data-table th[data-key="Summary"],
+.data-table td[data-key="Summary"] {
+  width: 40%;
+}
 
 /* Responsive */
 @media (max-width: 1024px) {
