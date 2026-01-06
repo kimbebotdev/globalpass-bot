@@ -851,6 +851,8 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             for entry in google_data:
                 flights_data = entry.get('flights', {})
                 all_google = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+                if not all_google:
+                    all_google = flights_data.get('all', [])
                 for g_f in all_google:
                     fn_match = re.search(r'\b([A-Z]{2,3}\d{1,4})\b', g_f.get('summary', ''))
                     fn = fn_match.group(1) if fn_match else None
@@ -1021,6 +1023,8 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         for entry in google_data:
             flights_data = entry.get('flights', {})
             all_gf = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+            if not all_gf:
+                all_gf = flights_data.get('all', [])
             for g_f in all_gf:
                 google_all_flights.append({
                     'Airline': g_f.get('airline', 'N/A'),
