@@ -356,6 +356,202 @@ class RunState:
         except Exception as e:
             logger.error("Error sending Slack notification for run %s: %s", self.id, e, exc_info=True)
 
+    async def send_initial_slack_notification(self):
+        """Send initial notification when a run starts via web interface"""
+        if not slack_web_client or not SLACK_ENABLED:
+            logger.warning("Slack client not available or disabled")
+            return
+        
+        try:
+            # Get default channel from environment or use a specific channel
+            channel = os.environ.get("SLACK_CHANNEL_ID")  # Replace with your channel ID
+            logger.info(f"Attempting to send Slack notification to channel: {channel}")
+            
+            # Format input data
+            trips = self.input_data.get('trips', [])
+            route = "N/A"
+            if trips:
+                trip = trips[0]
+                route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+            
+            itinerary = self.input_data.get('itinerary', [])
+            date = itinerary[0].get('date', 'N/A') if itinerary else 'N/A'
+            travel_class = itinerary[0].get('class', 'N/A') if itinerary else 'N/A'
+            
+            airline = self.input_data.get('airline', 'All Airlines') or 'All Airlines'
+            travel_status = self.input_data.get('travel_status', 'N/A')
+            nonstop = "Yes" if self.input_data.get('nonstop_flights', False) else "No"
+            
+            travellers = self.input_data.get('traveller', [])
+            traveller_count = len(travellers)
+            
+            message = (
+                f"*New Flight Search Started*\n\n"
+                f"*Run ID:* `{self.id}`\n"
+                f"*Route:* {route}\n"
+                f"*Date:* {date}\n"
+                f"*Class:* {travel_class}\n"
+                f"*Airline:* {airline}\n"
+                f"*Travel Status:* {travel_status}\n"
+                f"*Nonstop Only:* {nonstop}\n"
+                f"*Travellers:* {traveller_count}\n\n"
+                f"*Status:* Running scrapers..."
+            )
+            
+            response = await slack_web_client.chat_postMessage(
+                channel=channel,
+                text=message
+            )
+            
+            logger.info(f"Successfully sent Slack notification to {channel}")
+            logger.info(f"Message TS: {response.get('ts')}")
+            logger.info(f"Full response: {response}")
+            # Store the message timestamp for later updates
+            self.slack_channel = channel
+            self.slack_thread_ts = response['ts']
+            
+            logger.info(f"Sent initial Slack notification for run {self.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send initial Slack notification: {e}", exc_info=True)
+            logger.error(f"Error type: {type(e).__name__}")
+            if hasattr(e, 'response'):
+                logger.error(f"Slack API response: {e.response}")
+
+
+    async def update_slack_status(self, status_text: str):
+        """Update the status line in the original Slack message"""
+        if not self.slack_channel or not self.slack_thread_ts or not slack_web_client:
+            return
+        
+        try:
+            # Rebuild the original message with updated status
+            trips = self.input_data.get('trips', [])
+            route = "N/A"
+            if trips:
+                trip = trips[0]
+                route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+            
+            itinerary = self.input_data.get('itinerary', [])
+            date = itinerary[0].get('date', 'N/A') if itinerary else 'N/A'
+            travel_class = itinerary[0].get('class', 'N/A') if itinerary else 'N/A'
+            
+            airline = self.input_data.get('airline', 'All Airlines') or 'All Airlines'
+            travel_status = self.input_data.get('travel_status', 'N/A')
+            nonstop = "Yes" if self.input_data.get('nonstop_flights', False) else "No"
+            
+            travellers = self.input_data.get('traveller', [])
+            traveller_count = len(travellers)
+            
+            message = (
+                f"*New Flight Search Started*\n\n"
+                f"*Run ID:* `{self.id}`\n"
+                f"*Route:* {route}\n"
+                f"*Date:* {date}\n"
+                f"*Class:* {travel_class}\n"
+                f"*Airline:* {airline}\n"
+                f"*Travel Status:* {travel_status}\n"
+                f"*Nonstop Only:* {nonstop}\n"
+                f"*Travellers:* {traveller_count}\n\n"
+                f"*Status:* {status_text}"
+            )
+            
+            await slack_web_client.chat_update(
+                channel=self.slack_channel,
+                ts=self.slack_thread_ts,
+                text=message
+            )
+            
+            logger.info(f"Updated Slack status to: {status_text}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update Slack status: {e}", exc_info=True)
+
+
+    async def send_completion_slack_notification(self, top_flights: list):
+        """Send completion notification with top 5 flights as a thread reply"""
+        if not self.slack_channel or not self.slack_thread_ts or not slack_web_client:
+            logger.warning(f"Cannot send completion notification - channel: {self.slack_channel}, ts: {self.slack_thread_ts}, client: {bool(slack_web_client)}")
+            return
+        
+        try:
+            logger.info(f"Sending completion notification to {self.slack_channel}")
+            logger.info(f"Replying to thread with TS: {self.slack_thread_ts}")
+            
+            # First, update the main message status
+            if self.status == "completed":
+                await self.update_slack_status("Completed")
+            elif self.status == "error":
+                await self.update_slack_status(f"Failed - {self.error or 'Unknown error'}")
+            
+            # Then send the detailed results in thread
+            # Format route
+            trips = self.input_data.get('trips', [])
+            route = "N/A"
+            if trips:
+                trip = trips[0]
+                route = f"{trip.get('origin', '?')} → {trip.get('destination', '?')}"
+            
+            travel_status = (self.input_data.get('travel_status') or '').strip().lower()
+            is_bookable = travel_status == "bookable"
+            
+            if self.status == "completed":
+                # Build top flights message
+                flights_text = []
+                for idx, flight in enumerate(top_flights[:5], 1):
+                    flight_info = (
+                        f"*{idx}. {flight['Flight']}* ({flight['Airline']})\n"
+                        f"   - Aircraft: {flight['Aircraft']}\n"
+                        f"   - Departure: {flight['Departure']}\n"
+                        f"   - Arrival: {flight['Arrival']}\n"
+                        f"   - Duration: {flight['Duration']}\n"
+                        f"   - Stops: {flight['Stops']}\n"
+                    )
+                    
+                    if is_bookable and 'Price' in flight:
+                        flight_info += f"   - Price: ${flight['Price']}\n"
+                    elif 'Chance' in flight:
+                        flight_info += f"   - Availability: {flight['Chance']}\n"
+                    
+                    flights_text.append(flight_info)
+                
+                flights_section = "\n".join(flights_text) if flights_text else "_No flights found_"
+                
+                category = "Bookable Flights" if is_bookable else "R2 Standby Flights"
+                
+                message = (
+                    f"*Flight Search Complete*\n\n"
+                    f"*Run ID:* `{self.id}`\n"
+                    f"*Route:* {route}\n\n"
+                    f"*Top 5 {category}:*\n\n"
+                    f"{flights_section}\n"
+                    f"Full report available in run outputs"
+                )
+            else:
+                # Error case
+                message = (
+                    f"*Flight Search Failed*\n\n"
+                    f"*Run ID:* `{self.id}`\n"
+                    f"*Route:* {route}\n"
+                    f"*Error:* {self.error or 'Unknown error'}"
+                )
+            
+            # Reply in the thread instead of updating
+            await slack_web_client.chat_postMessage(
+                channel=self.slack_channel,
+                thread_ts=self.slack_thread_ts,
+                text=message
+            )
+            
+            logger.info(f"Sent completion reply to thread for run {self.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send completion reply: {e}", exc_info=True)
+            logger.error(f"Error type: {type(e).__name__}")
+            if hasattr(e, 'response'):
+                logger.error(f"Slack API response: {e.response}")
+
+
 @contextmanager
 def patch_config(attr: str, value: Any):
     previous = getattr(config, attr, None)
@@ -457,6 +653,11 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
     async with RUN_SEMAPHORE:
         state.status = "running"
         await state.push_status()
+        
+        # Send initial Slack notification if run was triggered from web interface
+        if not state.slack_channel:  # Only for web interface runs (not Slack-triggered)
+            await state.send_initial_slack_notification()
+        
         await state.log("Run started; launching three bots concurrently.")
         logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
 
@@ -471,8 +672,8 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         results = await asyncio.gather(*tasks)
 
         had_error = any(res.get("status") == "error" for res in results)
-        # await _mirror_legacy_outputs(state)
-        # Generate flight loads report directly from mirrored legacy outputs
+        
+        # Generate flight loads report
         await _run_generate_flight_loads(state)
 
         state.status = "error" if had_error else "completed"
@@ -480,9 +681,29 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         state.completed_at = datetime.utcnow()
         await state.log("Run finished." if not had_error else "Run finished with errors.")
         logger.info("Run %s completed status=%s", state.id, state.status)
+        
+        # Get top 5 flights for Slack notification
+        top_flights = []
+        try:
+            json_output = state.output_dir / "standby_report_multi.json"
+            if json_output.exists():
+                with open(json_output, 'r') as f:
+                    report_data = json.load(f)
+                    
+                # Get the appropriate top 5 list based on travel status
+                travel_status = (state.input_data.get('travel_status') or '').strip().lower()
+                if travel_status == "bookable":
+                    top_flights = report_data.get('Top_5_Bookable', [])
+                else:
+                    top_flights = report_data.get('Top_5_R2_Standby', [])
+        except Exception as e:
+            logger.error(f"Failed to load top flights for Slack: {e}")
+        
+        # Send completion notification with top flights
+        await state.send_completion_slack_notification(top_flights)
+        
         await state.push_status()
         state.done.set()
-
 
 async def _page_has_form(page: Page) -> bool:
     selectors = [
