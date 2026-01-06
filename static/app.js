@@ -17,13 +17,18 @@ const travelStatusSelect = document.getElementById("travel_status");
 const addFlightBtn = document.getElementById("add-flight");
 const legsContainer = document.getElementById("legs-container");
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
-const timeOptions = Array.from({ length: 24 }, (_, h) => `${h.toString().padStart(2, "0")}:00`);
+const timeOptions = Array.from(
+  { length: 24 },
+  (_, h) => `${h.toString().padStart(2, "0")}:00`
+);
 const isoToMmddyyyy = (val) => {
   if (!val) return "";
   if (val.includes("/")) return val;
   const parts = val.split("-");
   if (parts.length === 3) {
-    return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${parts[0]}`;
+    return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${
+      parts[0]
+    }`;
   }
   return val;
 };
@@ -32,7 +37,10 @@ const mmddyyyyToIso = (val) => {
   if (val.includes("-")) return val;
   const parts = val.split("/");
   if (parts.length === 3) {
-    return `${parts[2]}-${parts[0].padStart(2, "0")}-${parts[1].padStart(2, "0")}`;
+    return `${parts[2]}-${parts[0].padStart(2, "0")}-${parts[1].padStart(
+      2,
+      "0"
+    )}`;
   }
   return val;
 };
@@ -42,24 +50,48 @@ let currentRunId = null;
 let legs = [createLeg()];
 
 const sampleInput = {
-  flight_type: "round-trip",
-  trips: [{ origin: "DXB", destination: "SIN" }],
-  itinerary: [
-    { date: "01/30/2026", time: "09:00", class: "Business" },
-    { date: "02/25/2026", time: "12:30", class: "Business" },
-  ],
-  airline: "UA",
-  travel_status: "R2 Standby",
+  flight_type: "one-way",
   nonstop_flights: true,
+  airline: "",
+  travel_status: "Bookable",
+  trips: [
+    {
+      origin: "DXB",
+      destination: "SIN",
+    },
+  ],
+  itinerary: [
+    {
+      date: "02/01/2026",
+      time: "00:00",
+      class: "Economy",
+    },
+  ],
+  traveller: [
+    {
+      name: "Rafael Cruz",
+      salutation: "MR",
+      checked: true,
+    },
+  ],
+  travel_partner: [],
 };
 
 function createLeg(overrides = {}) {
-  return { origin: "", destination: "", date: "", time: "", class: "Economy", ...overrides };
+  return {
+    origin: "",
+    destination: "",
+    date: "",
+    time: "",
+    class: "Economy",
+    ...overrides,
+  };
 }
 
 function setStatus(status, text) {
   statusPill.className =
-    "pill " + (status === "completed" ? "ok" : status === "error" ? "error" : "pending");
+    "pill " +
+    (status === "completed" ? "ok" : status === "error" ? "error" : "pending");
   statusPill.textContent = text || status;
   statusLabel.textContent = text || status;
 }
@@ -76,7 +108,10 @@ function buildPayload() {
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      return { input: parsed, headed: document.getElementById("headed").checked };
+      return {
+        input: parsed,
+        headed: document.getElementById("headed").checked,
+      };
     } catch (err) {
       throw new Error("Invalid JSON: " + err.message);
     }
@@ -95,7 +130,9 @@ function buildPayload() {
     const t = trips[i];
     const it = itinerary[i];
     if (!t.origin || !t.destination || !it.date || !it.time) {
-      throw new Error(`Leg ${i + 1}: origin, destination, date, and time are required`);
+      throw new Error(
+        `Leg ${i + 1}: origin, destination, date, and time are required`
+      );
     }
   }
   const input = {
@@ -219,7 +256,12 @@ function renderLegs() {
     const title = document.createElement("div");
     title.className = "leg-title";
     if (type === "round-trip") {
-      title.textContent = idx === 0 ? "Departure leg" : idx === 1 ? "Return leg" : `Leg ${idx + 1}`;
+      title.textContent =
+        idx === 0
+          ? "Departure leg"
+          : idx === 1
+          ? "Return leg"
+          : `Leg ${idx + 1}`;
     } else {
       title.textContent = `Leg ${idx + 1}`;
     }
@@ -241,9 +283,16 @@ function renderLegs() {
     const grid = document.createElement("div");
     grid.className = "leg-grid";
 
-    grid.appendChild(makeInput("Origin", leg.origin, "e.g. DXB", (val) => (leg.origin = val)));
     grid.appendChild(
-      makeInput("Destination", leg.destination, "e.g. SIN", (val) => (leg.destination = val))
+      makeInput("Origin", leg.origin, "e.g. DXB", (val) => (leg.origin = val))
+    );
+    grid.appendChild(
+      makeInput(
+        "Destination",
+        leg.destination,
+        "e.g. SIN",
+        (val) => (leg.destination = val)
+      )
     );
     grid.appendChild(makeDateInput(leg));
     grid.appendChild(makeTimeSelect(leg));
@@ -340,17 +389,23 @@ function buildReportTabs(report) {
     }
     const headers = Object.keys(rows[0]);
     resultsBlock.innerHTML = `
-      <div><strong>${sheetName.replace(/_/g, " ").replace(/ All$/i, "")}</strong></div>
+      <div class="tab-title">${sheetName
+        .replace(/_/g, " ")
+        .replace(/ All$/i, "")}</div>
       <div style="overflow-x:auto;margin-top:8px;">
         <table class="data-table" id="data-table">
           <thead>
-            <tr>${headers.map((h) => `<th data-key="${h}">${h}</th>`).join("")}</tr>
+            <tr>${headers
+              .map((h) => `<th data-key="${h}">${h}</th>`)
+              .join("")}</tr>
           </thead>
           <tbody>
             ${rows
               .map(
                 (row) =>
-                  `<tr>${headers.map((h) => `<td>${row[h] ?? ""}</td>`).join("")}</tr>`
+                  `<tr>${headers
+                    .map((h) => `<td>${row[h] ?? ""}</td>`)
+                    .join("")}</tr>`
               )
               .join("")}
           </tbody>
@@ -367,7 +422,9 @@ function buildReportTabs(report) {
     btn.textContent = name.replace(/_/g, " ");
     btn.addEventListener("click", () => {
       active = name;
-      document.querySelectorAll(".tab").forEach((el) => el.classList.remove("active"));
+      document
+        .querySelectorAll(".tab")
+        .forEach((el) => el.classList.remove("active"));
       btn.classList.add("active");
       renderSheet(name);
     });
@@ -418,7 +475,8 @@ function ensureLegsMatchType() {
     legs = [createLeg()];
   }
   renderLegs();
-  addFlightBtn.style.display = type === "multiple-legs" ? "inline-flex" : "none";
+  addFlightBtn.style.display =
+    type === "multiple-legs" ? "inline-flex" : "none";
 }
 
 async function loadAirlines() {
@@ -481,8 +539,8 @@ fileInput.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-downloadJsonBtn.addEventListener("click", () => download("report_json"));
-downloadXlsxBtn.addEventListener("click", () => download("report_excel"));
+downloadJsonBtn.addEventListener("click", () => download("json"));
+downloadXlsxBtn.addEventListener("click", () => download("excel"));
 form.addEventListener("submit", startRun);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
 addFlightBtn.addEventListener("click", () => {

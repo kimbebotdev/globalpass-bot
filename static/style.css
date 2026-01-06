@@ -436,6 +436,34 @@ button:disabled {
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
+.tabs {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.tab {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(15, 36, 56, 0.8);
+  color: #e8f0fb;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+}
+.tab.active {
+  border-color: var(--accent);
+  background: linear-gradient(120deg, rgba(34, 211, 238, 0.18), rgba(34, 211, 238, 0.08));
+  color: var(--accent);
+  box-shadow: 0 10px 30px rgba(34, 211, 238, 0.2);
+}
+.tab-title {
+  font-weight: 700;
+  color: #e8f0fb;
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
 /* Table tuned for gray container background */
 .data-table {
   width: 100%;

@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -846,137 +848,65 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                         registry[fn]['Departure'] = time_parts[0].strip()
                         registry[fn]['Arrival'] = time_parts[1].strip()
 
-        # 3. Process Google Flights for pricing
-        for entry in google_data:
-            flights_data = entry.get('flights', {})
-            all_google = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
-
-            for g_f in all_google:
-                import re
-
-                # Extract price
-                price_str = g_f.get('price', '') or g_f.get('summary', '')
-                price_match = re.search(r'(\d[\d,]*)', price_str.replace('₱', '').replace(' ', ''))
-                price = int(price_match.group(1).replace(',', '')) if price_match else None
-
-                # Extract flight number from summary
-                fn_match = re.search(r'\b([A-Z]{2,3}\d{1,4})\b', g_f.get('summary', ''))
-                fn = fn_match.group(1) if fn_match else None
-
-                # Match by flight number if found
-                if fn and fn in registry:
-                    if registry[fn]['Price'] is None or (price and price < registry[fn]['Price']):
-                        registry[fn]['Price'] = price
-                    registry[fn]['Sources'].add('Google Flights')
-                else:
-                    # Fallback: match by airline and duration
-                    g_airline = g_f.get('airline', '')
-                    g_duration = to_minutes(g_f.get('duration', '0h 0m'))
-
-                    for reg_fn, data in registry.items():
-                        if (data['Airline'] == g_airline and
-                            abs(data['Duration'] - g_duration) <= 5):
-                            if data['Price'] is None or (price and price < data['Price']):
-                                data['Price'] = price
-                            data['Sources'].add('Google Flights')
-                            break
+        # 3. Process Google Flights (prices only if bookable)
+        travel_status_lower = (state.input_data.get("travel_status") or "").strip().lower()
+        if travel_status_lower == "bookable":
+            for entry in google_data:
+                flights_data = entry.get('flights', {})
+                all_google = flights_data.get('top_flights', []) + flights_data.get('other_flights', [])
+                for g_f in all_google:
+                    fn_match = re.search(r'\b([A-Z]{2,3}\d{1,4})\b', g_f.get('summary', ''))
+                    fn = fn_match.group(1) if fn_match else None
+                    price = None
+                    price_str = g_f.get('price') or g_f.get('summary') or ""
+                    price_match = re.search(r'(\d[\d,]*)', price_str.replace(' ', ''))
+                    if price_match:
+                        try:
+                            price = int(price_match.group(1).replace(',', ''))
+                        except Exception:
+                            price = None
+                    if fn and fn in registry:
+                        if price is not None:
+                            registry[fn]['Price'] = price
+                        registry[fn]['Sources'].add('Google Flights')
+                    else:
+                        g_airline = g_f.get('airline', '')
+                        g_duration = to_minutes(g_f.get('duration', '0h 0m'))
+                        for reg_fn, data in registry.items():
+                            if (data['Airline'] == g_airline and abs(data['Duration'] - g_duration) <= 5):
+                                if price is not None:
+                                    data['Price'] = price
+                                data['Sources'].add('Google Flights')
+                                break
 
         await state.log(f"[report] Built registry with {len(registry)} flights")
 
-        # Set default price for flights without Google data
-        DEFAULT_PRICE = 32000
-        for fn, f in registry.items():
-            if f['Price'] is None:
-                f['Price'] = DEFAULT_PRICE
-
-        # Calculate minimum duration for scoring
         valid_durations = [f['Duration'] for f in registry.values() if f['Duration'] > 0]
         min_dur = min(valid_durations) if valid_durations else 420  # 7 hours default
 
         def calculate_standby_load_score(f):
-            """
-            Calculate load score based on available data.
-            Since exact seat counts unavailable, use Chance as load proxy:
-            - HIGH chance = low load (easy to get on)
-            - MEDIUM chance = medium load (competitive)
-            - LOW chance = high load (difficult to get on)
-
-            Scoring prioritizes:
-            1. Chance/Load (most important)
-            2. Nonstop flights
-            3. Shorter duration
-            4. Tarif level (MID > HIGH)
-            """
-
-            # Map chance to load score (higher is better for boarding)
+            """Calculate load score based on available data."""
             chance_map = {
-                'HIGH': 1000,      # Excellent availability
-                'MEDIUM': 600,     # Moderate availability
-                'MID': 600,        # Same as MEDIUM
-                'LOW': 200,        # Poor availability
-                'Unknown': 0       # No data
+                'HIGH': 1000,
+                'MEDIUM': 600,
+                'MID': 600,
+                'LOW': 200,
+                'Unknown': 300,
             }
-            load_score = chance_map.get(f['Chance'], 0)
-
-            # Nonstop bonus (significant factor)
+            load_score = chance_map.get(f['Chance'], 300)
             nonstop_bonus = 300 if f['Stops'] == 0 else 0
-
-            # Duration bonus (prefer shorter flights)
             duration_bonus = (min_dur / f['Duration']) * 150 if f['Duration'] > 0 else 0
-
-            # Tarif bonus (MID tariff is better than HIGH for standby)
             tarif_map = {'MID': 100, 'HIGH': 50, 'LOW': 150, 'Unknown': 0}
             tarif_bonus = tarif_map.get(f['Tarif'], 0)
+            return load_score + nonstop_bonus + duration_bonus + tarif_bonus
 
-            total = load_score + nonstop_bonus + duration_bonus + tarif_bonus
-            return total
-
-        def calculate_bookable_score(f):
-            """
-            Calculate score for bookable flights.
-            Prioritizes:
-            1. Price (lower is better)
-            2. Aircraft comfort (A380/777 preferred)
-            3. Nonstop flights
-            4. Duration
-            """
-
-            # Price score (lower price = higher score)
-            if f['Price'] > 0:
-                # Normalize: 10000 PHP baseline, max 1000 points
-                price_score = min(1000, (15000 / f['Price']) * 1000)
-            else:
-                price_score = 0
-
-            # Aircraft comfort bonus
-            comfort_bonus = 0
-            if 'A380' in f['Aircraft'] or '388' in f['Aircraft']:
-                comfort_bonus = 250  # A380 is most comfortable
-            elif '777' in f['Aircraft'] or '77W' in f['Aircraft'] or 'B773' in f['Aircraft']:
-                comfort_bonus = 150  # 777 is also comfortable
-
-            # Nonstop bonus
-            nonstop_bonus = 200 if f['Stops'] == 0 else 0
-
-            # Duration bonus
-            duration_bonus = (min_dur / f['Duration']) * 100 if f['Duration'] > 0 else 0
-
-            total = price_score + comfort_bonus + nonstop_bonus + duration_bonus
-            return total
-
-        # Generate R2 Standby rankings (load-based)
+        # Standby ranking (use all registry flights, neutral score when unknown)
         standby_flights = []
         low_load_alerts = []
-
-        for fn, f in registry.items():
-            # Only include selectable flights for standby ranking
-            if not f['Selectable']:
-                continue
-
+        for f in registry.values():
             score = calculate_standby_load_score(f)
-
-            flight_info = {
-                'Flight': fn,
+            standby_flights.append({
+                'Flight': f['Flight'],
                 'Airline': f['Airline'],
                 'Aircraft': f['Aircraft'],
                 'Departure': f['Departure'],
@@ -984,36 +914,24 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Duration': f['Duration_Str'],
                 'Stops': f['Stops'],
                 'Chance': f['Chance'],
-                'Tarif': f['Tarif'],
                 'Source': ', '.join(sorted(list(f['Sources']))),
                 'Score': round(score, 2)
-            }
-
-            standby_flights.append(flight_info)
-
-            # Alert if chance is LOW (high load, poor availability)
+            })
             if f['Chance'] == 'LOW':
-                low_load_alerts.append(
-                    f"⚠️  {fn} ({f['Airline']}) - LOW availability (high load)"
-                )
+                low_load_alerts.append(f"⚠️ {f['Flight']} ({f['Airline']}) - LOW availability")
 
-        # Sort by score (highest = best load/availability)
         standby_flights.sort(key=lambda x: x['Score'], reverse=True)
-
-        # Log alerts
-        if low_load_alerts:
-            for alert in low_load_alerts:
-                await state.log(f"[ALERT] {alert}")
-
-        # If no selectable flights found
         if not standby_flights:
-            await state.log("[ALERT]️ No selectable standby flights found!")
+            await state.log("[ALERT]️ No standby flights found!")
+        
+        # NOTE: Hidden for now
+        # if low_load_alerts:
+        #     for alert in low_load_alerts:
+        #         await state.log(f"[ALERT] {alert}")
 
-        # Top 5 R2 Standby
-        top_5_standby = []
-        for i, item in enumerate(standby_flights[:5], 1):
-            ranked = {
-                'Rank': i,
+        top_5_standby = [
+            {
+                'Rank': i + 1,
                 'Flight': item['Flight'],
                 'Airline': item['Airline'],
                 'Aircraft': item['Aircraft'],
@@ -1024,36 +942,42 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Chance': item['Chance'],
                 'Source': item['Source']
             }
-            top_5_standby.append(ranked)
+            for i, item in enumerate(standby_flights[:5])
+        ]
 
-        # Bookable flights ranking
+        # Bookable flights (only when travel_status is bookable)
         bookable_flights = []
-        for fn, f in registry.items():
-            # Include all flights with pricing for bookable
-            if f['Price'] is None or f['Price'] <= 0:
-                continue
+        if travel_status_lower == "bookable":
+            for fn, f in registry.items():
+                if f['Price'] is None or f['Price'] <= 0:
+                    continue
+                score = 0
+                score += max(0, 1000 - (f['Price'] / max(f['Price'], 1)) * 1000)
+                preferred = ['A380', '77W', '789', '781', '359']
+                if any(p in f['Aircraft'] for p in preferred):
+                    score += 200
+                if f['Stops'] == 0:
+                    score += 200
+                if f['Duration'] > 0:
+                    score += (min_dur / f['Duration']) * 300
 
-            score = calculate_bookable_score(f)
+                bookable_flights.append({
+                    'Flight': fn,
+                    'Airline': f['Airline'],
+                    'Aircraft': f['Aircraft'],
+                    'Departure': f['Departure'],
+                    'Arrival': f['Arrival'],
+                    'Duration': f['Duration_Str'],
+                    'Stops': f['Stops'],
+                    'Price': f['Price'],
+                    'Source': ', '.join(sorted(list(f['Sources']))),
+                    'Score': round(score, 2)
+                })
+            bookable_flights.sort(key=lambda x: x['Score'], reverse=True)
 
-            bookable_flights.append({
-                'Flight': fn,
-                'Airline': f['Airline'],
-                'Aircraft': f['Aircraft'],
-                'Departure': f['Departure'],
-                'Arrival': f['Arrival'],
-                'Duration': f['Duration_Str'],
-                'Stops': f['Stops'],
-                'Price': f['Price'],
-                'Source': ', '.join(sorted(list(f['Sources']))),
-                'Score': round(score, 2)
-            })
-
-        bookable_flights.sort(key=lambda x: x['Score'], reverse=True)
-
-        top_5_bookable = []
-        for i, item in enumerate(bookable_flights[:5], 1):
-            ranked = {
-                'Rank': i,
+        top_5_bookable = [
+            {
+                'Rank': i + 1,
                 'Flight': item['Flight'],
                 'Airline': item['Airline'],
                 'Aircraft': item['Aircraft'],
@@ -1064,9 +988,10 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 'Price': item['Price'],
                 'Source': item['Source']
             }
-            top_5_bookable.append(ranked)
+            for i, item in enumerate(bookable_flights[:5])
+        ]
 
-        # Prepare data for all source sheets
+        # Prepare data for all source sheets (filtered by mode)
         myid_all_flights = []
         for routing in myid_data.get('routings', []):
             for f in routing.get('flights', []):
@@ -1164,13 +1089,14 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         # Build results
         results = {
             "Input_Summary": input_summary,
-            "Top_5_Bookable": top_5_bookable,
-            "Top_5_R2_Standby": top_5_standby,
-            "Alerts": low_load_alerts,
             "MyIDTravel_All": myid_all_flights,
             "Stafftraveler_All": staff_all_flights,
-            "Google_Flights_All": google_all_flights
+            "Google_Flights_All": google_all_flights,
         }
+        if travel_status_lower == "bookable":
+            results["Top_5_Bookable"] = top_5_bookable
+        else:
+            results["Top_5_R2_Standby"] = top_5_standby
 
         # Save JSON
         json_output = state.output_dir / "standby_report_multi.json"
@@ -1188,10 +1114,10 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             with pd.ExcelWriter(excel_output, engine='openpyxl') as writer:
                 pd.DataFrame(input_summary).to_excel(writer, sheet_name='Input', index=False)
 
-                if top_5_bookable:
+                if travel_status_lower == "bookable" and top_5_bookable:
                     pd.DataFrame(top_5_bookable).to_excel(writer, sheet_name='Bookable', index=False)
 
-                if top_5_standby:
+                if travel_status_lower != "bookable" and top_5_standby:
                     pd.DataFrame(top_5_standby).to_excel(writer, sheet_name='R2 Standby', index=False)
 
                 if myid_all_flights:
@@ -1202,10 +1128,6 @@ async def _run_generate_flight_loads(state: RunState) -> None:
 
                 if google_all_flights:
                     pd.DataFrame(google_all_flights).to_excel(writer, sheet_name='Google Flights', index=False)
-
-                if low_load_alerts:
-                    alerts_df = pd.DataFrame({'Alert': low_load_alerts})
-                    alerts_df.to_excel(writer, sheet_name='Alerts', index=False)
 
             state.result_files["standby_report_multi.xlsx"] = excel_output
             await state.log(f"[report] Generated {excel_output}")

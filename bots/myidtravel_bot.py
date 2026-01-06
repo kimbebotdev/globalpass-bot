@@ -397,6 +397,27 @@ async def close_modal_if_present(page) -> None:
                 continue
 
 
+async def wait_for_modal_or_travellers(page, timeout_ms: int = 8000) -> None:
+    """
+    Wait for a traveller modal (or any common modal close button) to appear before continuing.
+    Helps avoid racing ahead while the modal is still mounting.
+    """
+    selectors = [
+        config.TRAVELLER_ITEM_SELECTOR,
+        "[aria-label='Close']",
+        "button:has-text('Close')",
+        ".modal [data-testid='close'], .modal .close",
+    ]
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=timeout_ms)
+            return
+        except PlaywrightTimeout:
+            continue
+        except Exception:
+            continue
+
+
 async def apply_traveller_selection(page, travellers: list[dict]) -> None:
     """Check/uncheck travellers in the modal based on input list and set salutation when provided."""
     if not travellers:
@@ -650,7 +671,7 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first
     if await new_flight_btn.count():
         await new_flight_btn.click()
-        await page.wait_for_timeout(3000)
+        await wait_for_modal_or_travellers(page, timeout_ms=8000)
 
     travellers = input_data.get("traveller", [])
     await apply_traveller_selection(page, travellers)
