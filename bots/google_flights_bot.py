@@ -956,12 +956,6 @@ async def _fill_basic_form(
 
     from_field = row.locator(config.GF_FROM_INPUT).first if await row.locator(config.GF_FROM_INPUT).count() else page.locator(config.GF_FROM_INPUT).first
 
-    # Print only the HTML inside the element
-    # print(await from_field.inner_html())
-
-    # Print the HTML including the element's own tags (Outer HTML)
-    # print(await from_field.evaluate("el => el.outerHTML"))
-
     to_field = row.locator(config.GF_TO_INPUT).first if await row.locator(config.GF_TO_INPUT).count() else page.locator(config.GF_TO_INPUT).first
 
     await _fill_simple_field(from_field, origin)

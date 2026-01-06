@@ -17,7 +17,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import Page, async_playwright
 
-# Slack imports
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -34,7 +33,6 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-# Slack configuration
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_USER_OAUTH_TOKEN")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
 SLACK_ENABLED = bool(SLACK_BOT_TOKEN and SLACK_APP_TOKEN)
@@ -62,7 +60,6 @@ OUTPUT_ROOT = Path("outputs")
 RUNS: Dict[str, "RunState"] = {}
 RUN_SEMAPHORE = asyncio.Semaphore(1)
 
-# Slack clients
 slack_web_client: Optional[AsyncWebClient] = None
 slack_socket_client: Optional[SocketModeClient] = None
 slack_connected: bool = False
