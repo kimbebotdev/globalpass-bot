@@ -427,7 +427,7 @@ async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any
                     label = (await heading.inner_text()).strip()
             except Exception:
                 label = ""
-            
+
             # Look for list items - try ul > li structure first
             items = sec.locator("ul li.pIav2d")
             if not await items.count():
@@ -631,53 +631,103 @@ async def _ensure_leg_rows(page, count: int) -> None:
 
 
 async def _fill_leg_row(page, idx: int, origin: str, destination: str, date_str: str) -> None:
-    # Wait for any "from" input to exist in the page, fall back if container missing.
+    """Fill a specific leg row in multi-city flight form."""
+    # Wait for any "from" input to exist in the page
     try:
         await page.wait_for_selector(config.GF_FROM_INPUT, timeout=8000)
     except Exception:
         pass
 
-    fields_container = page.locator(config.GF_FIELDS_CONTAINER).first
-    if not await fields_container.count():
-        fields_container = page
+    logger.info(f"Attempting to fill leg {idx}: {origin} -> {destination} on {date_str}")
 
-    rows = fields_container.locator(config.GF_LEG_ROW)
-    row = rows.nth(idx) if await rows.count() > idx else fields_container
+    # Try multiple strategies to locate leg rows
+    rows = None
 
-    from_fields = row.locator(config.GF_FROM_INPUT)
-    to_fields = row.locator(config.GF_TO_INPUT)
-    date_fields = row.locator(config.GF_DEPART_INPUT)
+    # Strategy 1: Use configured leg selector across likely containers.
+    candidate_containers = [
+        page.locator(config.GF_FIELDS_CONTAINER).first,
+        page.locator(config.GF_FORM_CONTAINER).first,
+        page,
+    ]
 
-    origin_field = from_fields.first if await from_fields.count() else page.locator(config.GF_FROM_INPUT).first
-    dest_field = to_fields.first if await to_fields.count() else page.locator(config.GF_TO_INPUT).first
-    date_field = date_fields.first if await date_fields.count() else page.locator(config.GF_DEPART_INPUT).first
-
-    await _fill_simple_field(origin_field, origin)
-    await _fill_simple_field(dest_field, destination)
-
-    # Date picker: type value, fallback to JS set.
-    if date_field and await date_field.count():
+    for idx_container, container in enumerate(candidate_containers, start=1):
         try:
-            await date_field.click()
-            await date_field.fill("")
-            if date_str:
-                await date_field.type(_iso_date(date_str))
-                await date_field.press("Enter")
-                done_btn = page.get_by_role("button", name=re.compile("Done", re.I)).first
-                if await done_btn.count():
-                    try:
-                        await done_btn.click()
-                    except Exception:
-                        pass
-        except Exception:
+            if container and await container.count():
+                candidate_rows = container.locator(config.GF_LEG_ROW)
+            else:
+                candidate_rows = page.locator(config.GF_LEG_ROW)
+            row_count = await candidate_rows.count()
+            logger.info(f"Strategy 1.{idx_container} (GF_LEG_ROW via container {idx_container}): found {row_count} rows")
+            if row_count > 0:
+                rows = candidate_rows
+                break
+        except Exception as e:
+            logger.debug(f"Strategy 1.{idx_container} error: {e}")
+            continue
+
+    if rows and await rows.count() > 0:
+        row_count = await rows.count()
+        logger.info(f"Found {row_count} rows, filling row {idx}")
+
+        if idx >= row_count:
+            logger.warning(f"Row index {idx} exceeds available rows ({row_count})")
+            return
+
+        # Get the specific row for this index
+        row = rows.nth(idx)
+
+        # Get fields within THIS specific row only
+        from_fields = row.locator(config.GF_FROM_INPUT)
+        to_fields = row.locator(config.GF_TO_INPUT)
+        date_fields = row.locator(config.GF_DEPART_INPUT)
+
+        # Verify we have the fields in this row
+        from_count = await from_fields.count()
+        to_count = await to_fields.count()
+        date_count = await date_fields.count()
+
+        logger.info(f"Row {idx}: from={from_count}, to={to_count}, date={date_count} fields")
+
+        if from_count == 0 or to_count == 0 or date_count == 0:
+            logger.error(f"Missing fields in row {idx}")
+            return
+
+        # Use first field in this row
+        origin_field = from_fields.first
+        dest_field = to_fields.first
+        date_field = date_fields.first
+
+        # Fill the fields
+        await _fill_simple_field(origin_field, origin)
+        await _fill_simple_field(dest_field, destination)
+
+        # Date picker
+        if date_field and await date_field.count():
             try:
-                await date_field.evaluate(
-                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
-                    _iso_date(date_str),
-                )
+                await date_field.click()
+                await date_field.fill("")
+                if date_str:
+                    await date_field.type(_iso_date(date_str))
+                    await date_field.press("Enter")
+                    done_btn = page.get_by_role("button", name=re.compile("Done", re.I)).first
+                    if await done_btn.count():
+                        try:
+                            await done_btn.click()
+                        except Exception:
+                            pass
             except Exception:
-                pass
-    await page.wait_for_timeout(200)
+                try:
+                    await date_field.evaluate(
+                        "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                        _iso_date(date_str),
+                    )
+                except Exception:
+                    pass
+
+        await page.wait_for_timeout(500)
+        logger.info(f"Completed filling row {idx}")
+    else:
+        logger.error(f"Could not locate rows for leg {idx}")
 
 
 async def _fill_simple_field(locator, value: str) -> None:
@@ -685,25 +735,25 @@ async def _fill_simple_field(locator, value: str) -> None:
         return
     target = locator.first if hasattr(locator, "first") else locator
     page_obj = getattr(target, "page", None)
-    
+
     if not page_obj:
         logger.warning("No page object found for field")
         return
-    
+
     try:
         await target.wait_for(state="visible", timeout=5000)
     except Exception:
         pass
-    
+
     try:
         if hasattr(target, "count") and not await target.count():
             return
     except Exception:
         return
-    
+
     try:
         await target.scroll_into_view_if_needed()
-        
+
         # Click the field to open the overlay
         try:
             await target.click(timeout=3000)
@@ -746,31 +796,31 @@ async def _fill_simple_field(locator, value: str) -> None:
         # Clear and type the value
         try:
             await overlay_input.wait_for(state="visible", timeout=2000)
-            
+
             # Clear using triple-click
             try:
                 await overlay_input.click(click_count=3)
                 await page_obj.wait_for_timeout(100)
             except Exception:
                 pass
-            
+
             # Type the value
             logger.debug("Typing value: %s", value)
             await page_obj.keyboard.type(value, delay=80)
             await page_obj.wait_for_timeout(1500)  # Longer wait for autocomplete
-            
+
         except Exception as e:
             logger.debug("Error during input: %s", e)
             return
 
         # Now find the options - they appear in a listbox, not necessarily in a dialog
         code = value.strip().upper()
-        
+
         try:
             # Look for the listbox that appears after typing
             # Based on your HTML sample, it's a <ul role="listbox">
             listbox_selector = 'ul[role="listbox"]'
-            
+
             try:
                 await page_obj.wait_for_selector(listbox_selector, timeout=3000, state="visible")
                 await page_obj.wait_for_timeout(300)
@@ -779,10 +829,10 @@ async def _fill_simple_field(locator, value: str) -> None:
                 logger.debug("Listbox not found: %s", e)
                 # Try alternate wait
                 await page_obj.wait_for_timeout(1000)
-            
+
             # Find options within any visible listbox
             option = None
-            
+
             # Strategy 1: Find by exact data-code for airports (data-type="1")
             try:
                 option_selector = f'li[role="option"][data-code="{code}"][data-type="1"]'
@@ -795,26 +845,26 @@ async def _fill_simple_field(locator, value: str) -> None:
             except Exception as e:
                 logger.debug("Error finding by data-code: %s", e)
                 option = None
-            
+
             # Strategy 2: Search through all airport options (data-type="1")
             if not option:
                 try:
                     airport_options = page_obj.locator('li[role="option"][data-type="1"]')
                     count = await airport_options.count()
                     logger.debug("Searching through %s airport options", count)
-                    
+
                     for i in range(min(count, 20)):
                         opt = airport_options.nth(i)
                         try:
                             # Check if visible
                             if not await opt.is_visible():
                                 continue
-                            
+
                             opt_code = await opt.get_attribute("data-code")
                             opt_label = await opt.get_attribute("aria-label")
-                            
+
                             logger.debug("Option %s: code=%s label=%s", i, opt_code, opt_label)
-                            
+
                             if opt_code == code:
                                 option = opt
                                 logger.debug("Match by code")
@@ -828,7 +878,7 @@ async def _fill_simple_field(locator, value: str) -> None:
                             continue
                 except Exception as e:
                     logger.debug("Error searching airport options: %s", e)
-            
+
             # Strategy 3: Any visible option containing the code
             if not option:
                 try:
@@ -836,7 +886,7 @@ async def _fill_simple_field(locator, value: str) -> None:
                     all_options = page_obj.locator(f'li[role="option"]:visible')
                     count = await all_options.count()
                     logger.debug("Found %s visible options total", count)
-                    
+
                     for i in range(min(count, 10)):
                         opt = all_options.nth(i)
                         try:
@@ -849,27 +899,27 @@ async def _fill_simple_field(locator, value: str) -> None:
                             continue
                 except Exception as e:
                     logger.debug("Error in text search: %s", e)
-            
+
             # Click the matched option
             if option and await option.count() > 0:
                 try:
                     await option.scroll_into_view_if_needed()
                     await page_obj.wait_for_timeout(200)
-                    
+
                     try:
                         await option.click(timeout=2000)
                         logger.debug("Clicked option")
                     except Exception:
                         await option.click(force=True)
                         logger.debug("Force-clicked option")
-                    
+
                     await page_obj.wait_for_timeout(600)
                     return
                 except Exception as e:
                     logger.debug("Error clicking option: %s", e)
             else:
                 logger.debug("No matching option found for %s", code)
-                
+
         except Exception as e:
             logger.debug("Error with option selection: %s", e, exc_info=True)
 
@@ -880,7 +930,7 @@ async def _fill_simple_field(locator, value: str) -> None:
             await page_obj.wait_for_timeout(600)
         except Exception as e:
             logger.debug("Could not press Enter: %s", e)
-            
+
     except Exception as e:
         logger.error("Error filling field with value '%s': %s", value, e, exc_info=True)
 
@@ -945,9 +995,21 @@ async def _fill_basic_form(
                 pass
 
     if return_date:
-        # Return input often appears as the next date field.
-        date_fields = fields_container.locator(config.GF_DEPART_INPUT)
-        ret_field = date_fields.nth(1) if await date_fields.count() > 1 else None
+        # Prefer explicit return field, fall back to second date input.
+        ret_candidates = row.locator(config.GF_RETURN_INPUT)
+        ret_count = await ret_candidates.count()
+        if ret_count == 0:
+            ret_candidates = fields_container.locator(config.GF_RETURN_INPUT)
+            ret_count = await ret_candidates.count()
+        if ret_count == 0:
+            ret_candidates = page.locator(config.GF_RETURN_INPUT)
+            ret_count = await ret_candidates.count()
+
+        ret_field = ret_candidates.first if ret_count else None
+        if not ret_field or not await ret_field.count():
+            date_fields = fields_container.locator(config.GF_DEPART_INPUT)
+            ret_field = date_fields.nth(1)
+
         if ret_field and await ret_field.count():
             try:
                 await ret_field.click()
