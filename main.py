@@ -7,7 +7,7 @@ import re
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import asyncio.subprocess
 from dotenv import load_dotenv
@@ -592,12 +592,26 @@ def to_minutes(duration_str: str) -> int:
 async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
     output_path = state.output_dir / "myidtravel_flightschedule.json"
     await state.log("[myidtravel] starting")
+    notify: Optional[Callable[[str], Awaitable[None]]] = None
+    if state.slack_channel and slack_web_client:
+        async def _notify(msg: str) -> None:
+            try:
+                await slack_web_client.chat_postMessage(
+                    channel=state.slack_channel,
+                    thread_ts=state.slack_thread_ts,
+                    text=msg,
+                )
+            except Exception as exc:
+                logger.debug("Slack notify failed: %s", exc)
+        notify = _notify
+
     try:
         with patch_config("FLIGHTSCHEDULE_OUTPUT", output_path):
             await myidtravel_bot.run(
                 headless=not headed,
                 screenshot=None,
                 input_path=str(input_path),
+                notify=notify,
             )
         if output_path.exists():
             state.result_files["myidtravel"] = output_path

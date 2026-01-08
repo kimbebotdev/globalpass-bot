@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
@@ -54,24 +54,58 @@ def read_input(path: str) -> Dict[str, Any]:
     return data
 
 
-async def perform_login(context, headless: bool, screenshot: str | None):
+async def perform_login(
+    context,
+    headless: bool,
+    screenshot: str | None,
+    notify: Optional[Callable[[str], Awaitable[None]]] = None
+):
     username = os.getenv("UAL_USERNAME")
     password = os.getenv("UAL_PASSWORD")
+
     if not username or not password:
+        if notify:
+            try:
+                await notify("MyIDTravel: no Username/Password found.")
+            except Exception:
+                pass
         raise SystemExit("Set UAL_USERNAME and UAL_PASSWORD in your environment before running.")
 
     page = await context.new_page()
     await page.goto(config.LOGIN_URL, wait_until="domcontentloaded")
     await page.fill("#username", username)
+    await page.wait_for_timeout(500)
     await page.fill("#password", password)
     await page.click("input[type=submit][value='Login']")
 
-    try:
-        await page.wait_for_url(lambda url: "login" not in url, timeout=15000)
-    except PlaywrightTimeout:
-        pass
+    # Wait for navigation to complete
+    await page.wait_for_load_state("networkidle", timeout=15000)
 
-    await page.wait_for_load_state("networkidle")
+    # Check if we're still on a login page or if error is visible
+    current_url = page.url
+    error_loc = page.locator("div.login-error").first
+
+    # Check for error message
+    is_error_visible = await error_loc.is_visible()
+
+    # Check if URL still contains "login" or if error is present
+    if "login" in current_url.lower() or is_error_visible:
+        error_text = ""
+        if is_error_visible:
+            try:
+                error_text = (await error_loc.inner_text()).strip()
+            except Exception:
+                pass
+
+        message = f"MyIDTravel: login failed. {error_text}" if error_text else "MyIDTravel: login failed."
+        if notify:
+            try:
+                await notify(message)
+            except Exception:
+                pass
+        raise SystemExit(message)
+
+    # Login succeeded
     if screenshot:
         await page.screenshot(path=screenshot, full_page=True)
 
@@ -228,44 +262,44 @@ async def _fill_time_input(handle, value: str) -> bool:
     """
     Fill a time input by clicking it and selecting from the dropdown menu.
     Follows the same pattern as _fill_input but handles time dropdowns.
-    
+
     Args:
         locator: Playwright locator for the time input element
-        value: Time string in format "HH:MM" (e.g., "14:30", "09:00", "00:00")
-    
+        value: Time string in format "HH:MM" (e.g., "14:00", "09:00", "00:00")
+
     Returns:
         bool: True if time was successfully selected, False otherwise
     """
     if not value:
         return False
-    
+
     if not await handle.count():
         return False
-    
+
     page_obj = getattr(handle, "page", None)
-    
+
     if not page_obj:
         logger.warning("No page object found for time input")
         return False
-    
+
     try:
         # Parse the time value
         parts = value.strip().split(":")
         if len(parts) != 2:
             logger.warning("Invalid time format for time input: %s", value)
             return False
-        
+
         hour = parts[0].strip().lstrip("0") or "0"
         minute = parts[1].strip().lstrip("0") or "0"
-        
+
         # Format variations to try matching in dropdown
         formats_to_try = [
-            f"{hour.zfill(2)} :{minute.zfill(2)}",  # "01 :30"
-            f"{hour.zfill(2)}:{minute.zfill(2)}",    # "01:30"
-            f"{hour} :{minute.zfill(2)}",            # "1 :30"
-            f"{hour}:{minute.zfill(2)}",              # "1:30"
+            f"{hour.zfill(2)} :{minute.zfill(2)}",
+            f"{hour.zfill(2)}:{minute.zfill(2)}",
+            f"{hour} :{minute.zfill(2)}",
+            f"{hour}:{minute.zfill(2)}",
         ]
-        
+
         # Click the input to open dropdown
         try:
             await handle.scroll_into_view_if_needed()
@@ -278,7 +312,7 @@ async def _fill_time_input(handle, value: str) -> bool:
             except Exception as e:
                 logger.debug("Could not click time input: %s", e)
                 return False
-        
+
         # Wait for dropdown to appear
         try:
             await page_obj.wait_for_selector('div[role="menu"][id*="dropdown-menu"].show', timeout=2000, state="visible")
@@ -286,28 +320,28 @@ async def _fill_time_input(handle, value: str) -> bool:
             logger.debug("Dropdown menu did not appear for time input")
             # Try fallback: direct input
             return await _fill_time_fallback(handle, value)
-        
+
         # Find the dropdown menu - it should be visible now
         dropdown = page_obj.locator('div[role="menu"][id*="dropdown-menu"].show').first
         if not await dropdown.count() or not await dropdown.is_visible():
             logger.debug("Dropdown menu not visible for time input")
             return await _fill_time_fallback(handle, value)
-        
+
         # Find all menu items
         menu_items = dropdown.locator('button[role="menuitem"]')
         items_count = await menu_items.count()
-        
+
         # Try to find matching time
         selected = False
         for format_str in formats_to_try:
             if selected:
                 break
-                
+
             for i in range(items_count):
                 try:
                     item = menu_items.nth(i)
                     item_text = (await item.inner_text()).strip()
-                    
+
                     if item_text == format_str:
                         try:
                             await item.scroll_into_view_if_needed()
@@ -326,13 +360,13 @@ async def _fill_time_input(handle, value: str) -> bool:
                                 continue
                 except Exception:
                     continue
-        
+
         if not selected:
             logger.debug("No matching time option found for %s", value)
             return await _fill_time_fallback(handle, value)
-        
+
         return True
-        
+
     except Exception as e:
         logger.error("Error in _fill_time_input for value %s: %s", value, e, exc_info=True)
         # Fallback to direct input
@@ -349,7 +383,7 @@ async def _fill_time_fallback(handle, value: str) -> bool:
         await handle.press("Enter")
     except Exception:
         pass
-    
+
     # Force-set via JS if typing didn't work
     try:
         current = await handle.input_value()
@@ -740,14 +774,24 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     await page.wait_for_timeout(1000)
 
 
-async def run(headless: bool, screenshot: str | None, input_path: str) -> None:
+async def run(
+    headless: bool,
+    screenshot: str | None,
+    input_path: str,
+    notify: Optional[Callable[[str], Awaitable[None]]] = None
+) -> None:
     input_data = read_input(input_path)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
 
-        page = await perform_login(context, headless=headless, screenshot=screenshot)
+        page = await perform_login(
+            context,
+            headless=headless,
+            screenshot=screenshot,
+            notify=notify
+        )
         await context.storage_state(path="auth_state.json")
 
         await fill_form_from_input(page, input_data)
