@@ -1,18 +1,31 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
 
 import config
-from main import read_input
+from bots.myidtravel_bot import read_input
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
 
 LOGIN_URL = "https://stafftraveler.app/login"
@@ -344,6 +357,7 @@ async def perform_stafftraveller_login(
     storage_path: str,
     input_data: dict | None = None,
 ) -> None:
+    logger.info("Starting StaffTraveler login headless=%s", headless)
     username = os.getenv("ST_USERNAME")
     password = os.getenv("ST_PASSWORD")
     if not username or not password:
@@ -456,12 +470,14 @@ async def perform_stafftraveller_login(
             )
 
         if input_data:
+            logger.info("Performing StaffTraveler flight search")
             await perform_flight_search(page, input_data)
 
         if screenshot:
             await page.screenshot(path=screenshot, full_page=True)
 
         await context.storage_state(path=storage_path)
+        logger.info("StaffTraveler login/search complete; storage saved to %s", storage_path)
         await browser.close()
 
 

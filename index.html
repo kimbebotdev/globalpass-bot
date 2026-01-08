@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Globalpass Bot</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <h1>✈️ Globalpass Bot</h1>
+        <div class="meta">
+          <span class="chip">Automated Flight Search</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="status-row">
+          <h3>Configuration</h3>
+          <span class="pill pending" id="status-pill">idle</span>
+          <span class="badge" id="run-id"></span>
+        </div>
+        <form id="run-form">
+          <div class="field-grid">
+            <label>Flight Type
+              <select id="flight_type">
+                <option value="one-way">One-way</option>
+                <option value="round-trip">Round trip</option>
+                <option value="multiple-legs">Multiple legs / Multi-city</option>
+              </select>
+            </label>
+            <label>Travel Status
+              <select id="travel_status">
+                <option value="R2 Standby">R2 Standby</option>
+                <option value="Bookable">Bookable</option>
+              </select>
+            </label>
+            <label>Airline
+              <select id="airline">
+                <option value="">Loading...</option>
+              </select>
+            </label>
+            <label style="flex-direction: row; align-items: center; gap: 10px;">
+              <input id="nonstop_flights" type="checkbox">
+              <span>Non-stop only</span>
+            </label>
+            <label style="flex-direction: row; align-items: center; gap: 10px;">
+              <input id="headed" type="checkbox">
+              <span>Show browsers (headed)</span>
+            </label>
+          </div>
+
+          <div class="leg-header">
+            <div>
+              <div class="leg-title">Trips & Itinerary</div>
+              <div class="leg-subtitle">Add legs based on flight type (one-way: 1 leg, round-trip: 2 legs, multi-city:
+                many)</div>
+            </div>
+            <button class="ghost" type="button" id="add-flight">+ Add Flight</button>
+          </div>
+          <div id="legs-container" class="legs"></div>
+
+          <label>Raw JSON Override (optional)
+            <textarea id="raw-json" placeholder='Paste or drop input.json here to override form values'></textarea>
+          </label>
+
+          <div class="actions">
+            <input type="file" id="file-input" accept=".json" hidden>
+            <button class="ghost" type="button" id="load-file">Import JSON</button>
+            <button class="ghost" type="button" id="load-sample">Load Sample</button>
+            <div style="flex:1"></div>
+            <button class="primary" type="submit" id="run-btn">Run All Bots</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="status-row">
+          <h3>Live Logs</h3>
+          <span class="badge" id="status-label">waiting</span>
+        </div>
+        <div class="log-feed" id="log-feed">Awaiting bot execution...</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="status-row">
+        <h3>Results & Reports</h3>
+        <div style="flex: 1;"></div>
+        <button class="ghost" type="button" id="download-json" disabled>Export JSON</button>
+        <button class="ghost" type="button" id="download-xlsx" disabled>Export Excel</button>
+      </div>
+      <div class="file-row" id="file-list"></div>
+      <div class="tabs" id="report-tabs"></div>
+      <div class="results" id="results-block">Awaiting results. Run the bot to see output here.</div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>
