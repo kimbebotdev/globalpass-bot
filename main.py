@@ -722,6 +722,22 @@ async def _notify_validation_errors(state: "RunState", errors: list[str]) -> Non
         logger.error("Failed to send validation errors: %s", exc, exc_info=True)
 
 
+async def _notify_thread_message(state: "RunState", message: str) -> None:
+    if not slack_web_client or not SLACK_ENABLED:
+        return
+    channel = state.slack_channel or os.environ.get("SLACK_CHANNEL_ID")
+    if not channel:
+        return
+    try:
+        await slack_web_client.chat_postMessage(
+            channel=channel,
+            thread_ts=state.slack_thread_ts,
+            text=message,
+        )
+    except Exception as exc:
+        logger.error("Failed to send thread message: %s", exc, exc_info=True)
+
+
 def normalize_google_time(time_str: str) -> Optional[str]:
     """Converts 12h time (Google) to 24h 'HH:MM' for matching."""
     try:
@@ -1233,6 +1249,17 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         registry = {}
 
         # 1. Process MyIDTravel (primary source for availability)
+        myid_flights = [
+            flight
+            for routing in myid_data.get('routings', [])
+            for flight in routing.get('flights', [])
+        ]
+        if not myid_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: MyIDTravel returned no flights for this search.",
+            )
+
         for routing in myid_data.get('routings', []):
             for f in routing.get('flights', []):
                 seg = f['segments'][0]
@@ -1255,6 +1282,17 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 }
 
         # 2. Process StaffTraveler
+        staff_flights = [
+            flight
+            for entry in staff_data
+            for flight in entry.get('flight_details', [])
+        ]
+        if not staff_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: StaffTraveler returned no flights for this search.",
+            )
+
         for entry in staff_data:
             for f in entry.get('flight_details', []):
                 fn = f['airline_flight_number']
@@ -1287,6 +1325,18 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                         registry[fn]['Arrival'] = time_parts[1].strip()
 
         # 3. Process Google Flights (prices only if bookable)
+        google_flights = []
+        for entry in google_data:
+            flights_data = entry.get('flights', {})
+            google_flights.extend(flights_data.get('top_flights', []))
+            google_flights.extend(flights_data.get('other_flights', []))
+            google_flights.extend(flights_data.get('all', []))
+        if not google_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: Google Flights returned no flights for this search.",
+            )
+
         travel_status_lower = (state.input_data.get("travel_status") or "").strip().lower()
         if travel_status_lower == "bookable":
             for entry in google_data:
@@ -1363,11 +1413,10 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         standby_flights.sort(key=lambda x: x['Score'], reverse=True)
         if not standby_flights:
             await state.log("[ALERT]️ No standby flights found!")
-        
-        # NOTE: Hidden for now
-        # if low_load_alerts:
-        #     for alert in low_load_alerts:
-        #         await state.log(f"[ALERT] {alert}")
+            await _notify_thread_message(
+                state,
+                "No standby flights found.",
+            )
 
         top_5_standby = [
             {
