@@ -16,6 +16,16 @@ const airlineSelect = document.getElementById("airline");
 const travelStatusSelect = document.getElementById("travel_status");
 const addFlightBtn = document.getElementById("add-flight");
 const legsContainer = document.getElementById("legs-container");
+const toggleTravelPartnersBtn = document.getElementById("toggle-travel-partners");
+const addTravelPartnerBtn = document.getElementById("add-travel-partner");
+const travelPartnersSection = document.getElementById("travel-partners-section");
+const travelPartnersContainer = document.getElementById("travel-partners-container");
+const travelPartnersCount = document.getElementById("travel-partners-count");
+const inputSourceForm = document.getElementById("input-source-form");
+const inputSourceJson = document.getElementById("input-source-json");
+const formInputSection = document.getElementById("form-input-section");
+const jsonInputSection = document.getElementById("json-input-section");
+
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
 const timeOptions = Array.from(
   { length: 24 },
@@ -48,6 +58,7 @@ const mmddyyyyToIso = (val) => {
 let ws;
 let currentRunId = null;
 let legs = [createLeg()];
+let travelPartners = [];
 
 const sampleInput = {
   flight_type: "one-way",
@@ -88,6 +99,18 @@ function createLeg(overrides = {}) {
   };
 }
 
+function createPartner(overrides = {}) {
+  return {
+    type: "Adult",
+    salutation: "MR",
+    first_name: "",
+    last_name: "",
+    dob: "",
+    own_seat: true,
+    ...overrides,
+  };
+}
+
 function setStatus(status, text) {
   statusPill.className =
     "pill " +
@@ -103,14 +126,90 @@ function appendLog(msg) {
   logFeed.scrollTop = logFeed.scrollHeight;
 }
 
+function showToast(message, type = "error") {
+  if (window.Toastify) {
+    Toastify({
+      text: message,
+      duration: 4500,
+      gravity: "top",
+      position: "right",
+      close: true,
+      style: {
+        background: type === "error" ? "#d65b4a" : "#2e8b57",
+      },
+    }).showToast();
+  } else {
+    appendLog(message);
+  }
+}
+
+function validateInput(input) {
+  const errors = [];
+  if (!input || typeof input !== "object") {
+    errors.push("Input must be a JSON object.");
+    return errors;
+  }
+  const flightType = (input.flight_type || "").trim();
+  const travelStatus = (input.travel_status || "").trim();
+  if (!flightType) errors.push("flight_type is required.");
+  if (!travelStatus) errors.push("travel_status is required.");
+
+  const trips = Array.isArray(input.trips) ? input.trips : [];
+  const itinerary = Array.isArray(input.itinerary) ? input.itinerary : [];
+  const partners = Array.isArray(input.travel_partner) ? input.travel_partner : [];
+
+  if (flightType === "one-way") {
+    if (trips.length < 1) errors.push("one-way requires at least 1 trip.");
+    if (itinerary.length < 1) errors.push("one-way requires at least 1 itinerary entry.");
+  } else if (flightType === "round-trip") {
+    if (trips.length < 2) errors.push("round-trip requires 2 trips.");
+    if (itinerary.length < 2) errors.push("round-trip requires 2 itinerary entries.");
+  } else if (flightType === "multiple-legs") {
+    if (trips.length < 1) errors.push("multiple-legs requires at least 1 trip.");
+    if (itinerary.length < 1) errors.push("multiple-legs requires at least 1 itinerary entry.");
+  }
+
+  partners.forEach((partner, idx) => {
+    const label = `Travel partner ${idx + 1}`;
+    if (!partner || typeof partner !== "object") {
+      errors.push(`${label}: details are missing or invalid.`);
+      return;
+    }
+    const type = (partner.type || "").trim();
+    const firstName = (partner.first_name || "").trim();
+    const lastName = (partner.last_name || "").trim();
+    const salutation = (partner.salutation || "").trim();
+    const dob = (partner.dob || "").trim();
+    const ownSeat = partner.own_seat;
+    if (!type) errors.push(`${label}: type is required.`);
+    if (!firstName) errors.push(`${label}: first name is required.`);
+    if (!lastName) errors.push(`${label}: last name is required.`);
+    if (type === "Adult") {
+      if (!salutation) errors.push(`${label}: salutation is required for adults.`);
+    }
+    if (type === "Child") {
+      if (!dob) errors.push(`${label}: date of birth is required for children.`);
+    }
+    if (typeof ownSeat !== "boolean") {
+      errors.push(`${label}: own seat must be checked or unchecked.`);
+    }
+  });
+
+  return errors;
+}
+
 function buildPayload() {
+  const useJson = inputSourceJson?.checked;
   const raw = rawJson.value.trim();
-  if (raw) {
+  if (useJson) {
+    if (!raw) {
+      throw new Error("Raw JSON is required when JSON input is selected.");
+    }
     try {
       const parsed = JSON.parse(raw);
       return {
         input: parsed,
-        headed: document.getElementById("headed").checked,
+        headed: document.getElementById("headed")?.checked || false,
       };
     } catch (err) {
       throw new Error("Invalid JSON: " + err.message);
@@ -142,8 +241,27 @@ function buildPayload() {
     airline: airlineSelect.value,
     travel_status: travelStatusSelect.value,
     nonstop_flights: document.getElementById("nonstop_flights").checked,
+    travel_partner: travelPartners.map((p) => ({
+      type: p.type,
+      salutation: p.type === "Adult" ? p.salutation : undefined,
+      first_name: p.first_name,
+      last_name: p.last_name,
+      dob: p.type === "Child" ? p.dob : undefined,
+      own_seat: p.own_seat,
+    })),
   };
   return { input, headed: document.getElementById("headed").checked };
+}
+
+function setInputMode() {
+  const useJson = inputSourceJson?.checked;
+  if (useJson) {
+    formInputSection.style.display = 'none';
+    jsonInputSection.style.display = 'block';
+  } else {
+    formInputSection.style.display = 'block';
+    jsonInputSection.style.display = 'none';
+  }
 }
 
 async function startRun(event) {
@@ -159,7 +277,16 @@ async function startRun(event) {
   try {
     payload = buildPayload();
   } catch (err) {
+    showToast(err.message);
     appendLog(err.message);
+    setStatus("error", "invalid input");
+    return;
+  }
+
+  const validationErrors = validateInput(payload.input);
+  if (validationErrors.length) {
+    validationErrors.forEach((msg) => showToast(msg));
+    appendLog(validationErrors.join(" "));
     setStatus("error", "invalid input");
     return;
   }
@@ -303,6 +430,81 @@ function renderLegs() {
   });
 }
 
+function renderTravelPartners() {
+  if (!travelPartnersContainer) return;
+  travelPartnersContainer.innerHTML = "";
+  if (travelPartnersCount) {
+    travelPartnersCount.textContent = String(travelPartners.length);
+  }
+  travelPartners.forEach((partner, idx) => {
+    const card = document.createElement("div");
+    card.className = "leg-card";
+
+    const row = document.createElement("div");
+    row.className = "leg-row";
+    const title = document.createElement("div");
+    title.className = "leg-title";
+    title.textContent = `Partner ${idx + 1}`;
+    row.appendChild(title);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "remove-btn";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      travelPartners.splice(idx, 1);
+      renderTravelPartners();
+    });
+    row.appendChild(removeBtn);
+    card.appendChild(row);
+
+    const grid = document.createElement("div");
+    grid.className = "leg-grid";
+
+    grid.appendChild(
+      makeSelect("Type", ["Adult", "Child"], partner.type, (val) => {
+        partner.type = val;
+        if (partner.type === "Adult" && !partner.salutation) {
+          partner.salutation = "MR";
+        }
+        renderTravelPartners();
+      })
+    );
+
+    if (partner.type === "Adult") {
+      grid.appendChild(
+        makeSelect("Salutation", ["MR", "MS"], partner.salutation || "MR", (val) => {
+          partner.salutation = val;
+        })
+      );
+    }
+
+    grid.appendChild(
+      makeInput("First Name", partner.first_name, "e.g. Alex", (val) => {
+        partner.first_name = val;
+      })
+    );
+    grid.appendChild(
+      makeInput("Last Name", partner.last_name, "e.g. Cruz", (val) => {
+        partner.last_name = val;
+      })
+    );
+
+    if (partner.type === "Child") {
+      grid.appendChild(makePartnerDateInput(partner));
+    }
+
+    grid.appendChild(
+      makeCheckbox("Own Seat", partner.own_seat, (val) => {
+        partner.own_seat = val;
+      })
+    );
+
+    card.appendChild(grid);
+    travelPartnersContainer.appendChild(card);
+  });
+}
+
 function makeInput(labelText, value, placeholder, onChange, type = "text") {
   const wrap = document.createElement("label");
   wrap.textContent = labelText;
@@ -315,6 +517,38 @@ function makeInput(labelText, value, placeholder, onChange, type = "text") {
   return wrap;
 }
 
+function makeSelect(labelText, options, value, onChange) {
+  const wrap = document.createElement("label");
+  wrap.textContent = labelText;
+  const select = document.createElement("select");
+  options.forEach((opt) => {
+    const option = document.createElement("option");
+    option.value = opt;
+    option.textContent = opt;
+    select.appendChild(option);
+  });
+  select.value = value || options[0];
+  select.addEventListener("change", (e) => onChange(e.target.value));
+  wrap.appendChild(select);
+  return wrap;
+}
+
+function makeCheckbox(labelText, checked, onChange) {
+  const wrap = document.createElement("label");
+  wrap.style.flexDirection = "row";
+  wrap.style.alignItems = "center";
+  wrap.style.gap = "10px";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = Boolean(checked);
+  input.addEventListener("change", (e) => onChange(e.target.checked));
+  const text = document.createElement("span");
+  text.textContent = labelText;
+  wrap.appendChild(input);
+  wrap.appendChild(text);
+  return wrap;
+}
+
 function makeDateInput(leg) {
   const wrap = document.createElement("label");
   wrap.textContent = "Date";
@@ -323,6 +557,19 @@ function makeDateInput(leg) {
   input.value = leg.date ? mmddyyyyToIso(leg.date) : "";
   input.addEventListener("change", (e) => {
     leg.date = isoToMmddyyyy(e.target.value);
+  });
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function makePartnerDateInput(partner) {
+  const wrap = document.createElement("label");
+  wrap.textContent = "DOB";
+  const input = document.createElement("input");
+  input.type = "date";
+  input.value = partner.dob ? mmddyyyyToIso(partner.dob) : "";
+  input.addEventListener("change", (e) => {
+    partner.dob = isoToMmddyyyy(e.target.value);
   });
   wrap.appendChild(input);
   return wrap;
@@ -392,7 +639,7 @@ function buildReportTabs(report) {
       <div class="tab-title">${sheetName
         .replace(/_/g, " ")
         .replace(/ All$/i, "")}</div>
-      <div style="overflow-x:auto;margin-top:8px;">
+      <div class="table-responsive">
         <table class="data-table" id="data-table">
           <thead>
             <tr>${headers
@@ -505,26 +752,8 @@ async function loadAirlines() {
   }
 }
 
-function applySampleToForm(sample) {
-  flightTypeSelect.value = sample.flight_type || "one-way";
-  travelStatusSelect.value = sample.travel_status || "R2 Standby";
-  airlineSelect.value = sample.airline || "";
-  legs = (sample.trips || []).map((trip, idx) =>
-    createLeg({
-      origin: trip.origin,
-      destination: trip.destination,
-      date: (sample.itinerary || [])[idx]?.date || "",
-      time: (sample.itinerary || [])[idx]?.time || "",
-      class: (sample.itinerary || [])[idx]?.class || "Economy",
-    })
-  );
-  if (!legs.length) legs = [createLeg()];
-  ensureLegsMatchType();
-}
-
 loadSampleBtn.addEventListener("click", () => {
   rawJson.value = JSON.stringify(sampleInput, null, 2);
-  applySampleToForm(sampleInput);
 });
 
 loadFileBtn.addEventListener("click", () => fileInput.click());
@@ -543,13 +772,29 @@ downloadJsonBtn.addEventListener("click", () => download("json"));
 downloadXlsxBtn.addEventListener("click", () => download("excel"));
 form.addEventListener("submit", startRun);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
+inputSourceForm?.addEventListener("change", setInputMode);
+inputSourceJson?.addEventListener("change", setInputMode);
 addFlightBtn.addEventListener("click", () => {
   if (flightTypeSelect.value !== "multiple-legs") return;
   legs.push(createLeg());
   renderLegs();
 });
+toggleTravelPartnersBtn?.addEventListener("click", () => {
+  if (!travelPartnersSection) return;
+  const isHidden = travelPartnersSection.style.display === "none";
+  travelPartnersSection.style.display = isHidden ? "block" : "none";
+  if (toggleTravelPartnersBtn) {
+    toggleTravelPartnersBtn.textContent = isHidden ? "Hide" : "Show";
+  }
+});
+addTravelPartnerBtn?.addEventListener("click", () => {
+  travelPartners.push(createPartner());
+  renderTravelPartners();
+});
 
 ensureLegsMatchType();
 renderLegs();
+renderTravelPartners();
 loadAirlines();
+setInputMode();
 appendLog("Ready. Fill the form or drop a JSON payload.");

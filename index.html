@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Globalpass Bot</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -20,92 +21,217 @@
           <span class="chip">Automated Flight Search</span>
         </div>
       </div>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
     </header>
 
-    <div class="grid">
-      <div class="panel">
-        <div class="status-row">
-          <h3>Configuration</h3>
-          <span class="pill pending" id="status-pill">idle</span>
-          <span class="badge" id="run-id"></span>
-        </div>
-        <form id="run-form">
-          <div class="field-grid">
-            <label>Flight Type
-              <select id="flight_type">
-                <option value="one-way">One-way</option>
-                <option value="round-trip">Round trip</option>
-                <option value="multiple-legs">Multiple legs / Multi-city</option>
-              </select>
-            </label>
-            <label>Travel Status
-              <select id="travel_status">
-                <option value="R2 Standby">R2 Standby</option>
-                <option value="Bookable">Bookable</option>
-              </select>
-            </label>
-            <label>Airline
-              <select id="airline">
-                <option value="">Loading...</option>
-              </select>
-            </label>
-            <label style="flex-direction: row; align-items: center; gap: 10px;">
-              <input id="nonstop_flights" type="checkbox">
-              <span>Non-stop only</span>
-            </label>
-            <label style="flex-direction: row; align-items: center; gap: 10px;">
-              <input id="headed" type="checkbox">
-              <span>Show browsers (headed)</span>
+    <div class="main-grid">
+      <!-- Left Panel - Flight Details -->
+      <div class="left-panel">
+        <div class="panel">
+          <div class="status-row">
+            <h3>Flight Details</h3>
+            <span class="pill pending" id="status-pill">idle</span>
+            <span class="badge" id="run-id"></span>
+            <div style="flex: 1;"></div>
+            <label class="switch-container">
+              <span class="switch-label">Show Browser</span>
+              <input type="checkbox" id="headed" class="switch-input">
+              <span class="switch-slider"></span>
             </label>
           </div>
-
-          <div class="leg-header">
-            <div>
-              <div class="leg-title">Trips & Itinerary</div>
-              <div class="leg-subtitle">Add legs based on flight type (one-way: 1 leg, round-trip: 2 legs, multi-city:
-                many)</div>
+          <form id="run-form">
+            <!-- Input Mode Selector -->
+            <div class="input-mode-selector">
+              <div class="mode-option">
+                <input type="radio" name="input_source" id="input-source-form" value="form" checked>
+                <label for="input-source-form" class="mode-label">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                  </svg>
+                  <span>Form Input</span>
+                </label>
+              </div>
+              <div class="mode-option">
+                <input type="radio" name="input_source" id="input-source-json" value="json">
+                <label for="input-source-json" class="mode-label">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="16 18 22 12 16 6"></polyline>
+                    <polyline points="8 6 2 12 8 18"></polyline>
+                  </svg>
+                  <span>JSON Input</span>
+                </label>
+              </div>
             </div>
-            <button class="ghost" type="button" id="add-flight">+ Add Flight</button>
-          </div>
-          <div id="legs-container" class="legs"></div>
 
-          <label>Raw JSON Override (optional)
-            <textarea id="raw-json" placeholder='Paste or drop input.json here to override form values'></textarea>
-          </label>
+            <!-- Form Input Section -->
+            <div id="form-input-section">
+              <div class="field-grid">
+                <label>Flight Type
+                  <select id="flight_type">
+                    <option value="one-way">One-way</option>
+                    <option value="round-trip">Round trip</option>
+                    <option value="multiple-legs">Multiple legs / Multi-city</option>
+                  </select>
+                </label>
+                <label>Travel Status
+                  <select id="travel_status">
+                    <option value="R2 Standby">R2 Standby</option>
+                    <option value="Bookable">Bookable</option>
+                  </select>
+                </label>
+                <label>Airline
+                  <select id="airline">
+                    <option value="">Loading...</option>
+                  </select>
+                </label>
+                <label style="flex-direction: row; align-items: center; gap: 10px;">
+                  <input id="nonstop_flights" type="checkbox">
+                  <span>Non-stop only</span>
+                </label>
+              </div>
 
-          <div class="actions">
-            <input type="file" id="file-input" accept=".json" hidden>
-            <button class="ghost" type="button" id="load-file">Import JSON</button>
-            <button class="ghost" type="button" id="load-sample">Load Sample</button>
-            <div style="flex:1"></div>
-            <button class="primary" type="submit" id="run-btn">Run All Bots</button>
-          </div>
-        </form>
-      </div>
+              <div class="leg-header">
+                <div>
+                  <div class="leg-title">Travel Partners (optional)</div>
+                  <div class="leg-subtitle">Add adults or children traveling with you.</div>
+                </div>
+                <span class="badge" id="travel-partners-count">0</span>
+                <button class="ghost" type="button" id="toggle-travel-partners">Show</button>
+              </div>
+              <div id="travel-partners-section" style="display: none;">
+                <div id="travel-partners-container" class="legs"></div>
+                <div class="leg-header" style="margin-top: 8px;">
+                  <div></div>
+                  <button class="ghost" type="button" id="add-travel-partner">+ Add Travel Partner</button>
+                </div>
+              </div>
 
-      <div class="panel">
-        <div class="status-row">
-          <h3>Live Logs</h3>
-          <span class="badge" id="status-label">waiting</span>
+              <div class="leg-header">
+                <div>
+                  <div class="leg-title">Trips & Itinerary</div>
+                  <div class="leg-subtitle">Add legs based on flight type (one-way: 1 leg, round-trip: 2 legs,
+                    multi-city: many)</div>
+                </div>
+                <button class="ghost" type="button" id="add-flight">+ Add Flight</button>
+              </div>
+              <div id="legs-container" class="legs"></div>
+            </div>
+
+            <!-- JSON Input Section -->
+            <div id="json-input-section" style="display: none;">
+              <label>Raw JSON Payload
+                <textarea id="raw-json" placeholder='Paste or drop input.json here'></textarea>
+              </label>
+              <div class="json-actions">
+                <input type="file" id="file-input" accept=".json" hidden>
+                <button class="ghost" type="button" id="load-file">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                  </svg>
+                  Import JSON
+                </button>
+                <button class="ghost" type="button" id="load-sample">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                    <polyline points="13 2 13 9 20 9"></polyline>
+                  </svg>
+                  Load Sample
+                </button>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="primary" type="submit" id="run-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                Run All Bots
+              </button>
+            </div>
+          </form>
         </div>
-        <div class="log-feed" id="log-feed">Awaiting bot execution...</div>
       </div>
-    </div>
 
-    <div class="panel">
-      <div class="status-row">
-        <h3>Results & Reports</h3>
-        <div style="flex: 1;"></div>
-        <button class="ghost" type="button" id="download-json" disabled>Export JSON</button>
-        <button class="ghost" type="button" id="download-xlsx" disabled>Export Excel</button>
+      <!-- Right Panel - Logs & Results -->
+      <div class="right-panel">
+        <!-- Compact Live Logs -->
+        <div class="panel compact-panel">
+          <div class="status-row">
+            <h3>Live Logs</h3>
+            <span class="badge" id="status-label">waiting</span>
+          </div>
+          <div class="log-feed compact-log" id="log-feed">Awaiting bot execution...</div>
+        </div>
+
+        <!-- Results & Reports -->
+        <div class="panel">
+          <div class="status-row">
+            <h3>Results & Reports</h3>
+            <div style="flex: 1;"></div>
+            <button class="ghost" type="button" id="download-json" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              Export JSON
+            </button>
+            <button class="ghost" type="button" id="download-xlsx" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+              Export Excel
+            </button>
+          </div>
+          <div class="file-row" id="file-list"></div>
+          <div class="tabs" id="report-tabs"></div>
+          <div class="results" id="results-block">Awaiting results. Run the bot to see output here.</div>
+        </div>
       </div>
-      <div class="file-row" id="file-list"></div>
-      <div class="tabs" id="report-tabs"></div>
-      <div class="results" id="results-block">Awaiting results. Run the bot to see output here.</div>
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
   <script src="/static/app.js"></script>
+  <script>
+    // Theme toggle functionality - runs after app.js to avoid conflicts
+    const themeToggle = document.getElementById('theme-toggle');
+    const html = document.documentElement;
+
+    // Check for saved theme preference or default to 'light'
+    const currentTheme = localStorage.getItem('theme') || 'light';
+    html.setAttribute('data-theme', currentTheme);
+
+    themeToggle.addEventListener('click', () => {
+      const theme = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      html.setAttribute('data-theme', theme);
+      localStorage.setItem('theme', theme);
+    });
+  </script>
 </body>
 
 </html>
