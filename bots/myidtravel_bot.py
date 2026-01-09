@@ -24,6 +24,21 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+
+
+def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+    global _notify_callback
+    _notify_callback = callback
+
+
+async def _notify_message(message: str) -> None:
+    if _notify_callback:
+        try:
+            await _notify_callback(message)
+        except Exception:
+            pass
+
 def read_input(path: str) -> Dict[str, Any]:
     input_path = Path(path)
     if not input_path.exists():
@@ -58,17 +73,12 @@ async def perform_login(
     context,
     headless: bool,
     screenshot: str | None,
-    notify: Optional[Callable[[str], Awaitable[None]]] = None
 ):
     username = os.getenv("UAL_USERNAME")
     password = os.getenv("UAL_PASSWORD")
 
     if not username or not password:
-        if notify:
-            try:
-                await notify("MyIDTravel: no Username/Password found.")
-            except Exception:
-                pass
+        await _notify_message("MyIDTravel: no Username/Password found.")
         raise SystemExit("Set UAL_USERNAME and UAL_PASSWORD in your environment before running.")
 
     page = await context.new_page()
@@ -98,11 +108,7 @@ async def perform_login(
                 pass
 
         message = f"MyIDTravel: login failed. {error_text}" if error_text else "MyIDTravel: login failed."
-        if notify:
-            try:
-                await notify(message)
-            except Exception:
-                pass
+        await _notify_message(message)
         raise SystemExit(message)
 
     # Login succeeded
@@ -692,10 +698,20 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
         logger.info("Saved flightschedule response to %s", output_path)
+        if isinstance(data, dict):
+            routings = data.get("routings", [])
+            has_flights = any(
+                isinstance(routing, dict) and routing.get("flights")
+                for routing in routings
+            )
+            if not has_flights:
+                await _notify_message("MyIDTravel: no results available for the search.")
     except asyncio.TimeoutError:
         logger.warning("Timed out waiting for flightschedule response; no JSON saved.")
+        await _notify_message("MyIDTravel: Timed out waiting for flight schedule response; no JSON saved.")
     except Exception as exc:
         logger.error("Error capturing flightschedule response: %s", exc, exc_info=True)
+        await _notify_message("MyIDTravel: Error capturing flight schedule response.")
 
 
 async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
@@ -778,7 +794,6 @@ async def run(
     headless: bool,
     screenshot: str | None,
     input_path: str,
-    notify: Optional[Callable[[str], Awaitable[None]]] = None
 ) -> None:
     input_data = read_input(input_path)
 
@@ -786,12 +801,7 @@ async def run(
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
 
-        page = await perform_login(
-            context,
-            headless=headless,
-            screenshot=screenshot,
-            notify=notify
-        )
+        page = await perform_login(context, headless=headless, screenshot=screenshot)
         await context.storage_state(path="auth_state.json")
 
         await fill_form_from_input(page, input_data)

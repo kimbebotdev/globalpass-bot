@@ -7,7 +7,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable, Optional
 
 from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
@@ -26,6 +26,21 @@ if not logging.getLogger().handlers:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+
+
+def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+    global _notify_callback
+    _notify_callback = callback
+
+
+async def _notify_message(message: str) -> None:
+    if _notify_callback:
+        try:
+            await _notify_callback(message)
+        except Exception:
+            pass
 
 
 LOGIN_URL = "https://stafftraveler.app/login"
