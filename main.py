@@ -339,7 +339,8 @@ class RunState:
                     if file_path.exists():
                         message += f"• {file_key}\n"
 
-                message += f"\nDownload results at: `{self.output_dir}`"
+                report_url = f"{config.BASE_URL}/api/runs/{self.id}/download-report-xlsx"
+                message += f"\nDownload Excel: <{report_url}|{self.id}.xlsx>"
 
             elif self.status == "error":
                 message = f"*Scraper Failed*\nRun ID: `{self.id}`\nError: {self.error}"
@@ -566,6 +567,177 @@ def make_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 
+def _is_valid_date_mmddyyyy(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%m/%d/%Y")
+        return True
+    except Exception:
+        return False
+
+
+def _validate_and_normalize_input(input_data: Dict[str, Any]) -> tuple[Dict[str, Any], list[str]]:
+    errors: list[str] = []
+    normalized = dict(input_data or {})
+
+    flight_type = (normalized.get("flight_type") or "").strip()
+    travel_status = (normalized.get("travel_status") or "").strip()
+    if not flight_type:
+        errors.append("flight_type is required.")
+    if not travel_status:
+        errors.append("travel_status is required.")
+
+    normalized["airline"] = normalized.get("airline") or ""
+    if "nonstop_flights" not in normalized or normalized.get("nonstop_flights") in ("", None):
+        normalized["nonstop_flights"] = False
+
+    trips = normalized.get("trips")
+    if not isinstance(trips, list) or not trips:
+        errors.append("trips must be a non-empty array.")
+        trips = []
+    for idx, trip in enumerate(trips):
+        if not isinstance(trip, dict):
+            errors.append(f"trips[{idx}] must be an object.")
+            continue
+        if not (trip.get("origin") or "").strip():
+            errors.append(f"trips[{idx}].origin is required.")
+        if not (trip.get("destination") or "").strip():
+            errors.append(f"trips[{idx}].destination is required.")
+
+    itinerary = normalized.get("itinerary")
+    if not isinstance(itinerary, list) or not itinerary:
+        errors.append("itinerary must be a non-empty array.")
+        itinerary = []
+    for idx, leg in enumerate(itinerary):
+        if not isinstance(leg, dict):
+            errors.append(f"itinerary[{idx}] must be an object.")
+            continue
+        date_val = (leg.get("date") or "").strip()
+        time_val = (leg.get("time") or "").strip()
+        class_val = (leg.get("class") or "").strip()
+        if not date_val:
+            errors.append(f"itinerary[{idx}].date is required.")
+        elif not _is_valid_date_mmddyyyy(date_val):
+            errors.append(f"itinerary[{idx}].date must be MM/DD/YYYY.")
+        if not time_val:
+            errors.append(f"itinerary[{idx}].time is required.")
+        if not class_val:
+            errors.append(f"itinerary[{idx}].class is required.")
+
+    if flight_type == "one-way":
+        if len(trips) < 1:
+            errors.append("one-way requires at least 1 trip.")
+        if len(itinerary) < 1:
+            errors.append("one-way requires at least 1 itinerary entry.")
+    elif flight_type == "round-trip":
+        if len(trips) < 2:
+            errors.append("round-trip requires 2 trips.")
+        if len(itinerary) < 2:
+            errors.append("round-trip requires 2 itinerary entries.")
+    elif flight_type == "multiple-legs":
+        if len(trips) < 1:
+            errors.append("multiple-legs requires at least 1 trip.")
+        if len(itinerary) < 1:
+            errors.append("multiple-legs requires at least 1 itinerary entry.")
+
+    travellers = normalized.get("traveller", [])
+    if travellers and not isinstance(travellers, list):
+        errors.append("traveller must be an array.")
+        travellers = []
+    for idx, traveller in enumerate(travellers or []):
+        if not isinstance(traveller, dict):
+            errors.append(f"traveller[{idx}] must be an object.")
+            continue
+        name_val = (traveller.get("name") or "").strip()
+        salutation_val = (traveller.get("salutation") or "").strip().upper()
+        checked_val = traveller.get("checked")
+        if not name_val:
+            errors.append(f"traveller[{idx}].name is required.")
+        if salutation_val not in {"MR", "MS"}:
+            errors.append(f"traveller[{idx}].salutation must be MR or MS.")
+        if not isinstance(checked_val, bool):
+            errors.append(f"traveller[{idx}].checked must be a boolean.")
+        traveller["salutation"] = salutation_val
+
+    partners = normalized.get("travel_partner", [])
+    if partners and not isinstance(partners, list):
+        errors.append("travel_partner must be an array.")
+        partners = []
+    for idx, partner in enumerate(partners or []):
+        if not isinstance(partner, dict):
+            errors.append(f"travel_partner[{idx}] must be an object.")
+            continue
+        p_type = (partner.get("type") or "").strip().lower()
+        if p_type not in {"adult", "child"}:
+            errors.append(f"travel_partner[{idx}].type must be Adult or Child.")
+        first_name = (partner.get("first_name") or "").strip()
+        last_name = (partner.get("last_name") or "").strip()
+        if not first_name:
+            errors.append(f"travel_partner[{idx}].first_name is required.")
+        if not last_name:
+            errors.append(f"travel_partner[{idx}].last_name is required.")
+        if "own_seat" not in partner or partner.get("own_seat") is None:
+            partner["own_seat"] = True
+        if p_type == "adult":
+            salutation_val = (partner.get("salutation") or "").strip().upper()
+            if salutation_val not in {"MR", "MS"}:
+                errors.append(f"travel_partner[{idx}].salutation must be MR or MS.")
+            partner["salutation"] = salutation_val
+        if p_type == "child":
+            dob_val = (partner.get("dob") or "").strip()
+            if not dob_val:
+                errors.append(f"travel_partner[{idx}].dob is required for Child.")
+            elif not _is_valid_date_mmddyyyy(dob_val):
+                errors.append(f"travel_partner[{idx}].dob must be MM/DD/YYYY.")
+
+    return normalized, errors
+
+
+async def _notify_invalid_input(errors: list[str]) -> None:
+    if not slack_web_client or not SLACK_ENABLED:
+        return
+    channel = os.environ.get("SLACK_CHANNEL_ID")
+    if not channel:
+        return
+    message = "*Run blocked: invalid input*\n" + "\n".join(f"• {err}" for err in errors)
+    try:
+        await slack_web_client.chat_postMessage(channel=channel, text=message)
+    except Exception as exc:
+        logger.error("Failed to send invalid input notification: %s", exc, exc_info=True)
+
+
+async def _notify_validation_errors(state: "RunState", errors: list[str]) -> None:
+    if not slack_web_client or not SLACK_ENABLED:
+        return
+    message = "*Run blocked: invalid input*\n" + "\n".join(f"• {err}" for err in errors)
+    channel = state.slack_channel or os.environ.get("SLACK_CHANNEL_ID")
+    if not channel:
+        return
+    try:
+        await slack_web_client.chat_postMessage(
+            channel=channel,
+            thread_ts=state.slack_thread_ts,
+            text=message,
+        )
+    except Exception as exc:
+        logger.error("Failed to send validation errors: %s", exc, exc_info=True)
+
+
+async def _notify_thread_message(state: "RunState", message: str) -> None:
+    if not slack_web_client or not SLACK_ENABLED:
+        return
+    channel = state.slack_channel or os.environ.get("SLACK_CHANNEL_ID")
+    if not channel:
+        return
+    try:
+        await slack_web_client.chat_postMessage(
+            channel=channel,
+            thread_ts=state.slack_thread_ts,
+            text=message,
+        )
+    except Exception as exc:
+        logger.error("Failed to send thread message: %s", exc, exc_info=True)
+
+
 def normalize_google_time(time_str: str) -> Optional[str]:
     """Converts 12h time (Google) to 24h 'HH:MM' for matching."""
     try:
@@ -607,12 +779,15 @@ async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> Dic
 
     try:
         with patch_config("FLIGHTSCHEDULE_OUTPUT", output_path):
-            await myidtravel_bot.run(
-                headless=not headed,
-                screenshot=None,
-                input_path=str(input_path),
-                notify=notify,
-            )
+            myidtravel_bot.set_notifier(notify)
+            try:
+                await myidtravel_bot.run(
+                    headless=not headed,
+                    screenshot=None,
+                    input_path=str(input_path),
+                )
+            finally:
+                myidtravel_bot.set_notifier(None)
         if output_path.exists():
             state.result_files["myidtravel"] = output_path
             await state.log(f"[myidtravel] wrote results to {output_path}")
@@ -627,14 +802,30 @@ async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> Dic
 async def run_google_flights(state: RunState, input_path: Path, limit: int, headed: bool) -> Dict[str, Any]:
     output_path = state.output_dir / "google_flights_results.json"
     await state.log("[google_flights] starting")
+    notify: Optional[Callable[[str], Awaitable[None]]] = None
+    if state.slack_channel and slack_web_client:
+        async def _notify(msg: str) -> None:
+            try:
+                await slack_web_client.chat_postMessage(
+                    channel=state.slack_channel,
+                    thread_ts=state.slack_thread_ts,
+                    text=msg,
+                )
+            except Exception as exc:
+                logger.debug("Slack notify failed: %s", exc)
+        notify = _notify
     try:
-        await google_flights_bot.run(
-            headless=not headed,
-            input_path=str(input_path),
-            output=output_path,
-            limit=limit,
-            screenshot=None,
-        )
+        google_flights_bot.set_notifier(notify)
+        try:
+            await google_flights_bot.run(
+                headless=not headed,
+                input_path=str(input_path),
+                output=output_path,
+                limit=limit,
+                screenshot=None,
+            )
+        finally:
+            google_flights_bot.set_notifier(None)
         state.result_files["google_flights"] = output_path
         await state.log(f"[google_flights] wrote results to {output_path}")
         return {"name": "google_flights", "status": "ok", "output": str(output_path)}
@@ -646,15 +837,34 @@ async def run_google_flights(state: RunState, input_path: Path, limit: int, head
 async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> Dict[str, Any]:
     output_path = state.output_dir / "stafftraveller_results.json"
     storage_path = state.output_dir / "stafftraveler_auth_state.json"
+
     await state.log("[stafftraveler] starting")
+    notify: Optional[Callable[[str], Awaitable[None]]] = None
+
+    if state.slack_channel and slack_web_client:
+        async def _notify(msg: str) -> None:
+            try:
+                await slack_web_client.chat_postMessage(
+                    channel=state.slack_channel,
+                    thread_ts=state.slack_thread_ts,
+                    text=msg,
+                )
+            except Exception as exc:
+                logger.debug("Slack notify failed: %s", exc)
+        notify = _notify
     try:
         with patch_config("STAFF_RESULTS_OUTPUT", output_path):
-            await stafftraveler_bot.perform_stafftraveller_login(
-                headless=not headed,
-                screenshot=None,
-                storage_path=str(storage_path),
-                input_data=myidtravel_bot.read_input(str(input_path)),
-            )
+            stafftraveler_bot.set_notifier(notify)
+            try:
+                await stafftraveler_bot.perform_stafftraveller_login(
+                    headless=not headed,
+                    screenshot=None,
+                    storage_path=str(storage_path),
+                    input_data=myidtravel_bot.read_input(str(input_path)),
+                )
+            finally:
+                stafftraveler_bot.set_notifier(None)
+                
         state.result_files["stafftraveler"] = output_path
         await state.log(f"[stafftraveler] wrote results to {output_path}")
         return {"name": "stafftraveler", "status": "ok", "output": str(output_path)}
@@ -672,6 +882,18 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         if not state.slack_channel:  # Only for web interface runs (not Slack-triggered)
             await state.send_initial_slack_notification()
         
+        normalized_input, errors = _validate_and_normalize_input(state.input_data)
+        if errors:
+            await state.log("Run aborted: invalid input.")
+            await _notify_validation_errors(state, errors)
+            state.status = "error"
+            state.error = "invalid input"
+            state.completed_at = datetime.utcnow()
+            await state.push_status()
+            state.done.set()
+            return
+        state.input_data = normalized_input
+
         await state.log("Run started; launching three bots concurrently.")
         logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
 
@@ -1027,6 +1249,17 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         registry = {}
 
         # 1. Process MyIDTravel (primary source for availability)
+        myid_flights = [
+            flight
+            for routing in myid_data.get('routings', [])
+            for flight in routing.get('flights', [])
+        ]
+        if not myid_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: MyIDTravel returned no flights for this search.",
+            )
+
         for routing in myid_data.get('routings', []):
             for f in routing.get('flights', []):
                 seg = f['segments'][0]
@@ -1049,6 +1282,17 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 }
 
         # 2. Process StaffTraveler
+        staff_flights = [
+            flight
+            for entry in staff_data
+            for flight in entry.get('flight_details', [])
+        ]
+        if not staff_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: StaffTraveler returned no flights for this search.",
+            )
+
         for entry in staff_data:
             for f in entry.get('flight_details', []):
                 fn = f['airline_flight_number']
@@ -1081,6 +1325,18 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                         registry[fn]['Arrival'] = time_parts[1].strip()
 
         # 3. Process Google Flights (prices only if bookable)
+        google_flights = []
+        for entry in google_data:
+            flights_data = entry.get('flights', {})
+            google_flights.extend(flights_data.get('top_flights', []))
+            google_flights.extend(flights_data.get('other_flights', []))
+            google_flights.extend(flights_data.get('all', []))
+        if not google_flights:
+            await _notify_thread_message(
+                state,
+                "Flight load not available: Google Flights returned no flights for this search.",
+            )
+
         travel_status_lower = (state.input_data.get("travel_status") or "").strip().lower()
         if travel_status_lower == "bookable":
             for entry in google_data:
@@ -1157,11 +1413,10 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         standby_flights.sort(key=lambda x: x['Score'], reverse=True)
         if not standby_flights:
             await state.log("[ALERT]️ No standby flights found!")
-        
-        # NOTE: Hidden for now
-        # if low_load_alerts:
-        #     for alert in low_load_alerts:
-        #         await state.log(f"[ALERT] {alert}")
+            await _notify_thread_message(
+                state,
+                "No standby flights found.",
+            )
 
         top_5_standby = [
             {
@@ -1443,11 +1698,16 @@ async def start_run(payload: Dict[str, Any] = Body(...)):
         input_data = payload
 
     if not isinstance(input_data, dict):
+        await _notify_invalid_input(["Request body must be a JSON object."])
         raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
 
     limit = payload.get("limit") if isinstance(payload, dict) else None
     limit = int(limit) if isinstance(limit, int) or (isinstance(limit, str) and limit.isdigit()) else 30
     headed = bool(payload.get("headed")) if isinstance(payload, dict) else False
+    input_data, errors = _validate_and_normalize_input(input_data)
+    if errors:
+        await _notify_invalid_input(errors)
+        raise HTTPException(status_code=400, detail={"errors": errors})
 
     run_id = make_run_id()
     run_dir = OUTPUT_ROOT / run_id
@@ -1510,6 +1770,17 @@ async def download(run_id: str, kind: str):
         raise HTTPException(status_code=404, detail=f"No output found for {kind}")
 
     raise HTTPException(status_code=400, detail="Unsupported download format.")
+
+
+@app.get("/api/runs/{run_id}/download-report-xlsx")
+async def download_report_xlsx(run_id: str):
+    run_dir = OUTPUT_ROOT / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found.")
+    path = run_dir / REPORT_XLSX
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Report Excel not found.")
+    return FileResponse(path, filename=f"{run_id}.xlsx")
 
 
 @app.post("/api/scrape-airlines")
