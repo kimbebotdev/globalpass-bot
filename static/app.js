@@ -25,6 +25,7 @@ const inputSourceForm = document.getElementById("input-source-form");
 const inputSourceJson = document.getElementById("input-source-json");
 const formInputSection = document.getElementById("form-input-section");
 const jsonInputSection = document.getElementById("json-input-section");
+const headedToggle = document.getElementById("headed-toggle");
 
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
 const timeOptions = Array.from(
@@ -797,4 +798,8 @@ renderLegs();
 renderTravelPartners();
 loadAirlines();
 setInputMode();
+const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+if (headedToggle && !isDevHost) {
+  headedToggle.style.display = "none";
+}
 appendLog("Ready. Fill the form or drop a JSON payload.");
