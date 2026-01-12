@@ -748,6 +748,19 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
 
     travel_status = input_data.get("travel_status", "")
     if travel_status:
+        try:
+            selector_count = await page.locator(config.TRAVEL_STATUS_SELECTOR).count()
+            fallback_count = await page.locator(
+                "input[placeholder*='Travel' i], input[aria-label*='Travel' i]"
+            ).count()
+            logger.info(
+                "Travel status locator counts: selector=%s fallback=%s",
+                selector_count,
+                fallback_count,
+            )
+            await page.screenshot(path="debug_travel_status.png", full_page=True)
+        except Exception as exc:
+            logger.info("Travel status debug failed: %s", exc)
         await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status, placeholder_hint="Travel status")
 
     trips = input_data.get("trips", [])
