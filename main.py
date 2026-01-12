@@ -460,7 +460,7 @@ class RunState:
             await slack_web_client.chat_update(
                 channel=self.slack_channel,
                 ts=self.slack_thread_ts,
-                text=message
+                text=_truncate_slack_message(message)
             )
             
             logger.info(f"Updated Slack status to: {status_text}")
@@ -565,6 +565,12 @@ def patch_config(attr: str, value: Any):
 
 def make_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def _truncate_slack_message(message: str, limit: int = 3900) -> str:
+    if len(message) <= limit:
+        return message
+    return message[:limit].rstrip() + "…"
 
 
 def _is_valid_date_mmddyyyy(value: str) -> bool:
