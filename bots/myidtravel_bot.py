@@ -721,6 +721,17 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
 async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     logger.info("Successful login; filling form")
 
+    try:
+        await page.wait_for_selector(config.TRAVEL_STATUS_SELECTOR, timeout=15000)
+    except Exception:
+        try:
+            await page.wait_for_selector(
+                "input[placeholder*='Travel' i], input[aria-label*='Travel' i]",
+                timeout=15000,
+            )
+        except Exception:
+            pass
+
     # Click "New Flight" first, then close modal if it appears.
     new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first
     if await new_flight_btn.count():
