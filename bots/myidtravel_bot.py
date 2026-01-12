@@ -168,8 +168,12 @@ async def type_and_select_in_container(container_or_field, selector: str, value:
         await field.press("Enter")
 
 
-async def select_react_select(page, selector: str, value: str) -> None:
+async def select_react_select(page, selector: str, value: str, placeholder_hint: str | None = None) -> None:
     input_el = page.locator(selector).first
+    if not await input_el.count() and placeholder_hint:
+        input_el = page.locator(f'input[placeholder*="{placeholder_hint}" i], input[aria-label*="{placeholder_hint}" i]').first
+    if not await input_el.count():
+        return
     await input_el.click()
     await input_el.fill("")
     await input_el.type(value, delay=50)
@@ -740,11 +744,11 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
 
     airline = input_data.get("airline", "")
     if airline:
-        await select_react_select(page, config.AIRLINE_SELECTOR, airline)
+        await select_react_select(page, config.AIRLINE_SELECTOR, airline, placeholder_hint="Airline")
 
     travel_status = input_data.get("travel_status", "")
     if travel_status:
-        await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status)
+        await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status, placeholder_hint="Travel status")
 
     trips = input_data.get("trips", [])
     trip0 = trips[0] if trips else {}
