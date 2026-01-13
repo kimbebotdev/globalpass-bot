@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import asyncio.subprocess
+import urllib.request
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,10 +23,10 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
+load_dotenv()
+
 import config
 from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
-
-load_dotenv()
 logger = logging.getLogger("globalpass")
 if not logging.getLogger().handlers:
     logging.basicConfig(
@@ -395,7 +396,7 @@ class RunState:
                 f"*Airline:* {airline}\n"
                 f"*Travel Status:* {travel_status}\n"
                 f"*Nonstop Only:* {nonstop}\n"
-                f"*Travellers:* {traveller_count}\n\n"
+                f"*Travelers:* {traveller_count}\n\n"
                 f"*Status:* Running scrapers..."
             )
             
@@ -453,7 +454,7 @@ class RunState:
                 f"*Airline:* {airline}\n"
                 f"*Travel Status:* {travel_status}\n"
                 f"*Nonstop Only:* {nonstop}\n"
-                f"*Travellers:* {traveller_count}\n\n"
+                f"*Travelers:* {traveller_count}\n\n"
                 f"*Status:* {status_text}"
             )
             
@@ -500,19 +501,23 @@ class RunState:
                 # Build top flights message
                 flights_text = []
                 for idx, flight in enumerate(top_flights[:5], 1):
+                    flight_number = flight.get("Flight") or flight.get("flight_number") or "N/A"
+                    airline = flight.get("Airline") or flight.get("airline") or "N/A"
                     flight_info = (
-                        f"*{idx}. {flight['Flight']}* ({flight['Airline']})\n"
-                        f"   - Aircraft: {flight['Aircraft']}\n"
-                        f"   - Departure: {flight['Departure']}\n"
-                        f"   - Arrival: {flight['Arrival']}\n"
-                        f"   - Duration: {flight['Duration']}\n"
-                        f"   - Stops: {flight['Stops']}\n"
+                        f"*{idx}. {flight_number}* ({airline})\n"
+                        f"   - Aircraft: {flight.get('Aircraft') or flight.get('aircraft') or 'N/A'}\n"
+                        f"   - Departure: {flight.get('Departure') or flight.get('departure_time') or 'N/A'}\n"
+                        f"   - Arrival: {flight.get('Arrival') or flight.get('arrival_time') or 'N/A'}\n"
+                        f"   - Duration: {flight.get('Duration') or flight.get('duration') or 'N/A'}\n"
+                        f"   - Stops: {flight.get('Stops') or flight.get('stops') or 'N/A'}\n"
                     )
                     
-                    if is_bookable and 'Price' in flight:
-                        flight_info += f"   - Price: ${flight['Price']}\n"
-                    elif 'Chance' in flight:
-                        flight_info += f"   - Availability: {flight['Chance']}\n"
+                    if is_bookable and ('Price' in flight or 'price' in flight):
+                        price_val = flight.get("Price") or flight.get("price")
+                        flight_info += f"   - Price: ${price_val}\n"
+                    elif 'Chance' in flight or 'load_status' in flight:
+                        chance_val = flight.get("Chance") or flight.get("load_status")
+                        flight_info += f"   - Availability: {chance_val}\n"
                     
                     flights_text.append(flight_info)
                 
@@ -571,6 +576,100 @@ def _truncate_slack_message(message: str, limit: int = 3900) -> str:
     if len(message) <= limit:
         return message
     return message[:limit].rstrip() + "…"
+
+
+def _build_route_string(input_data: Dict[str, Any]) -> str:
+    trips = input_data.get("trips", [])
+    if not trips:
+        return "N/A"
+    if len(trips) == 1:
+        trip = trips[0]
+        return f"{trip.get('origin', '?')} -> {trip.get('destination', '?')}"
+    return " | ".join(
+        f"{trip.get('origin', '?')} -> {trip.get('destination', '?')}" for trip in trips
+    )
+
+
+def _extract_json_from_text(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            pass
+    return None
+
+
+def _call_gemini(prompt: str) -> str:
+    if not config.GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+async def _generate_flight_loads_gemini(
+    input_data: Dict[str, Any],
+    myid_data: Dict[str, Any],
+    staff_data: list,
+    google_data: list,
+) -> tuple[list[Dict[str, Any]] | None, str]:
+    route = _build_route_string(input_data)
+    prompt = (
+        "Context: I am a software engineer and frequent user of staff travel benefits. "
+        "I am providing you with multiple JSON files containing flight search results: "
+        "one from a commercial aggregator (Google Flights), one from a staff booking portal "
+        "(myIDTravel), and one from a load-sharing app (StaffTraveller).\n\n"
+        "Task: Analyze the provided JSON files to identify the top 5 flight options for the route "
+        f"{route}.\n\n"
+        "Requirements:\n"
+        "1. Prioritize Load Data: Use the chance or travelStatus fields from the staff travel files "
+        "to determine availability. Note that in staff travel contexts, \"LOW chance\" typically "
+        "indicates a high load (full flight).\n"
+        "2. Cross-Reference: Use the commercial data to verify flight times or equipment if the staff "
+        "travel data is incomplete.\n"
+        "3. Output Format: Provide the final result in a clean JSON format with the following keys: "
+        "flight_number, airline, origin, destination, departure_time, arrival_time, date, load_status, "
+        "and source_file.\n"
+        "4. Tone: Be concise and direct. Do not include introductory fluff.\n\n"
+        "myIDTravel JSON:\n"
+        f"{json.dumps(myid_data)}\n\n"
+        "StaffTraveller JSON:\n"
+        f"{json.dumps(staff_data)}\n\n"
+        "Google Flights JSON:\n"
+        f"{json.dumps(google_data)}\n"
+    )
+    text = await asyncio.to_thread(_call_gemini, prompt)
+    parsed = _extract_json_from_text(text)
+    if isinstance(parsed, list):
+        return parsed, text
+    return None, text
 
 
 def _is_valid_date_mmddyyyy(value: str) -> bool:
@@ -1208,6 +1307,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         myid_data = {}
         google_data = []
         staff_data = []
+        gemini_top_flights: list[Dict[str, Any]] | None = None
 
         myid_path = state.result_files.get("myidtravel")
         google_path = state.result_files.get("google_flights")
@@ -1245,6 +1345,30 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 await state.log(f"[report] Failed to load StaffTraveler: {e}")
         else:
             await state.log("[report] StaffTraveler data not available")
+
+        if config.FINAL_OUTPUT_FORMAT == "gemini":
+            try:
+                await state.log("[report] Generating top flights with Gemini")
+                gemini_top_flights, gemini_raw = await _generate_flight_loads_gemini(
+                    state.input_data,
+                    myid_data,
+                    staff_data,
+                    google_data,
+                )
+                if gemini_raw:
+                    gemini_text_path = state.output_dir / "gemini_response.txt"
+                    gemini_text_path.write_text(gemini_raw)
+                    state.result_files["gemini_response.txt"] = gemini_text_path
+                    gemini_json = _extract_json_from_text(gemini_raw)
+                    if gemini_json is not None:
+                        gemini_json_path = state.output_dir / "gemini_response.json"
+                        gemini_json_path.write_text(json.dumps(gemini_json, indent=2))
+                        state.result_files["gemini_response.json"] = gemini_json_path
+                if not gemini_top_flights:
+                    await state.log("[report] Gemini returned no usable top flights; falling back to default")
+            except Exception as exc:
+                await state.log(f"[report] Gemini generation failed: {exc}")
+                gemini_top_flights = None
 
         # If no data at all, cannot proceed
         if not myid_data and not staff_data and not google_data:
@@ -1486,6 +1610,12 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             for i, item in enumerate(bookable_flights[:5])
         ]
 
+        if gemini_top_flights:
+            if travel_status_lower == "bookable":
+                top_5_bookable = gemini_top_flights
+            else:
+                top_5_standby = gemini_top_flights
+
         # Prepare data for all source sheets (filtered by mode)
         myid_all_flights = []
         for routing in myid_data.get('routings', []):
@@ -1567,7 +1697,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                 input_summary.append({'Parameter': f'Leg {idx} - Class', 'Value': itin.get('class', 'N/A')})
         input_summary.append({'Parameter': '', 'Value': ''})
 
-        # Travellers
+        # Travelers
         travellers = input_data.get('traveller', [])
         input_summary.append({'Parameter': 'Number of Travellers', 'Value': len(travellers)})
         for idx, traveller in enumerate(travellers, 1):
