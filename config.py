@@ -21,6 +21,11 @@ BASE_URL_DEV = os.getenv("BASE_URL_DEV", "http://localhost:8000").rstrip("/")
 BASE_URL_PROD = os.getenv("BASE_URL_PROD", BASE_URL_DEV).rstrip("/")
 BASE_URL = BASE_URL_PROD if ENVIRONMENT == "prod" else BASE_URL_DEV
 
+# Flight loads output format: default | gemini
+FINAL_OUTPUT_FORMAT = os.getenv("FINAL_OUTPUT_FORMAT", "default").strip().lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+
 # Form selectors
 ORIGIN_SELECTOR = "#Origin"
 DEST_SELECTOR = "#Destination"

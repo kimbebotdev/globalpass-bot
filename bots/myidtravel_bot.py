@@ -168,8 +168,12 @@ async def type_and_select_in_container(container_or_field, selector: str, value:
         await field.press("Enter")
 
 
-async def select_react_select(page, selector: str, value: str) -> None:
+async def select_react_select(page, selector: str, value: str, placeholder_hint: str | None = None) -> None:
     input_el = page.locator(selector).first
+    if not await input_el.count() and placeholder_hint:
+        input_el = page.locator(f'input[placeholder*="{placeholder_hint}" i], input[aria-label*="{placeholder_hint}" i]').first
+    if not await input_el.count():
+        return
     await input_el.click()
     await input_el.fill("")
     await input_el.type(value, delay=50)
@@ -717,6 +721,17 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
 async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     logger.info("Successful login; filling form")
 
+    try:
+        await page.wait_for_selector(config.TRAVEL_STATUS_SELECTOR, timeout=15000)
+    except Exception:
+        try:
+            await page.wait_for_selector(
+                "input[placeholder*='Travel' i], input[aria-label*='Travel' i]",
+                timeout=15000,
+            )
+        except Exception:
+            pass
+
     # Click "New Flight" first, then close modal if it appears.
     new_flight_btn = page.locator(config.NEW_FLIGHT_SELECTOR).first
     if await new_flight_btn.count():
@@ -740,11 +755,24 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
 
     airline = input_data.get("airline", "")
     if airline:
-        await select_react_select(page, config.AIRLINE_SELECTOR, airline)
+        await select_react_select(page, config.AIRLINE_SELECTOR, airline, placeholder_hint="Airline")
 
     travel_status = input_data.get("travel_status", "")
     if travel_status:
-        await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status)
+        try:
+            selector_count = await page.locator(config.TRAVEL_STATUS_SELECTOR).count()
+            fallback_count = await page.locator(
+                "input[placeholder*='Travel' i], input[aria-label*='Travel' i]"
+            ).count()
+            logger.info(
+                "Travel status locator counts: selector=%s fallback=%s",
+                selector_count,
+                fallback_count,
+            )
+            await page.screenshot(path="debug_travel_status.png", full_page=True)
+        except Exception as exc:
+            logger.info("Travel status debug failed: %s", exc)
+        await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status, placeholder_hint="Travel status")
 
     trips = input_data.get("trips", [])
     trip0 = trips[0] if trips else {}
