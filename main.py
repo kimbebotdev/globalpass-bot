@@ -629,8 +629,14 @@ def _call_gemini(prompt: str) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8") if exc.fp else str(exc)
+        raise RuntimeError(f"Gemini HTTP error {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
@@ -641,6 +647,7 @@ async def _generate_flight_loads_gemini(
     google_data: list,
 ) -> tuple[list[Dict[str, Any]] | None, str]:
     route = _build_route_string(input_data)
+    logger.info("Gemini: model=%s route=%s", config.GEMINI_MODEL, route)
     prompt = (
         "Context: I am a software engineer and frequent user of staff travel benefits. "
         "I am providing you with multiple JSON files containing flight search results: "
@@ -665,7 +672,9 @@ async def _generate_flight_loads_gemini(
         "Google Flights JSON:\n"
         f"{json.dumps(google_data)}\n"
     )
+    logger.info("Gemini: sending request (prompt chars=%s)", len(prompt))
     text = await asyncio.to_thread(_call_gemini, prompt)
+    logger.info("Gemini: received response (chars=%s)", len(text))
     parsed = _extract_json_from_text(text)
     if isinstance(parsed, list):
         return parsed, text
