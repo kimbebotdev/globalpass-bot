@@ -110,6 +110,13 @@ header {
   align-items: center;
 }
 
+.header-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
 header::before {
   content: "";
   position: absolute;
@@ -791,6 +798,145 @@ button:disabled {
   word-wrap: break-word;
 }
 
+/* Find Flight card */
+.dashboard-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+.status-header {
+  padding: 24px;
+  background: linear-gradient(to right, var(--surface), var(--bg-tertiary));
+}
+
+.flight-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.airline-tag {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.on-time {
+  color: var(--success);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.timeline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: relative;
+}
+
+.node {
+  text-align: center;
+  z-index: 2;
+  background: var(--surface);
+  padding: 0 5px;
+}
+
+.node h2 {
+  margin: 0;
+  font-size: 1.8rem;
+  letter-spacing: -1px;
+}
+
+.node p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.line {
+  position: absolute;
+  top: 35%;
+  left: 20%;
+  right: 20%;
+  border-bottom: 2px dashed var(--border);
+  z-index: 1;
+}
+
+.loads-container {
+  padding: 20px;
+  background: var(--accent-glow);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 12px;
+  display: block;
+}
+
+.loads-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.load-pill {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 10px;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.load-pill span {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+}
+
+.load-pill strong {
+  font-size: 1.2rem;
+  display: block;
+}
+
+.load-low {
+  color: var(--danger);
+}
+
+.load-high {
+  color: var(--success);
+}
+
+.footer-info {
+  padding: 12px 20px;
+  background: var(--bg-tertiary);
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+}
+
+.find-flight-grid {
+  align-items: stretch;
+}
+
+.find-flight-grid .panel {
+  height: 100%;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  padding: 12px 4px;
+}
+
 /* Responsive */
 @media (max-width: 1200px) {
   .main-grid {
@@ -809,7 +955,7 @@ button:disabled {
     align-items: flex-start;
   }
 
-  .theme-toggle {
+  .header-actions {
     position: absolute;
     top: 24px;
     right: 24px;

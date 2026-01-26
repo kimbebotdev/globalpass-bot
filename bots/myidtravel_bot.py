@@ -822,6 +822,7 @@ async def run(
     headless: bool,
     screenshot: str | None,
     input_path: str,
+    final_screenshot: str | None = None,
 ) -> None:
     input_data = read_input(input_path)
 
@@ -833,6 +834,14 @@ async def run(
         await context.storage_state(path="auth_state.json")
 
         await fill_form_from_input(page, input_data)
+
+        if final_screenshot:
+            try:
+                screenshot_path = Path(final_screenshot)
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+            except Exception:
+                pass
 
         await browser.close()
 

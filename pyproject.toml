@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 120
+ignore = ["E402"] # Allow imports to appear anywhere in the file
+
+[tool.ruff.lint]
+# Enable specific rulesets
+# E, F = Flake8 defaults
+# I = isort (Import sorting)
+# B = flake8-bugbear (Bug prevention)
+# UP = pyupgrade (Modernize syntax)
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+# Options to match Prettier-style preferences if desired
+quote-style = "double"
+indent-style = "space"

@@ -4,11 +4,13 @@ import json
 import logging
 import re
 import sys
-from datetime import date, datetime
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any
 
-from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -17,9 +19,9 @@ if str(BASE_DIR) not in sys.path:
 import config
 from bots.myidtravel_bot import read_input
 
-
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
+MAX_ADULTS = 9
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
     logging.basicConfig(
@@ -27,10 +29,10 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+_notify_callback: Callable[[str], Awaitable[None]] | None = None
 
 
-def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+def set_notifier(callback: Callable[[str], Awaitable[None]] | None) -> None:
     global _notify_callback
     _notify_callback = callback
 
@@ -43,7 +45,7 @@ async def _notify_message(message: str) -> None:
             pass
 
 
-def _parse_date(date_str: str) -> Optional[datetime]:
+def _parse_date(date_str: str) -> datetime | None:
     """
     Try to parse a date string in common formats used by input.json.
     """
@@ -60,7 +62,7 @@ def _iso_date(date_str: str) -> str:
     return dt.strftime("%Y-%m-%d") if dt else date_str
 
 
-def build_legs(input_data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], str]:
+def build_legs(input_data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     """
     Normalize the input.json format into legs suitable for Google Flights form.
     """
@@ -71,7 +73,7 @@ def build_legs(input_data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], str]:
     if not trips:
         raise SystemExit("Input must include at least one trip.")
 
-    legs: List[Dict[str, Any]] = []
+    legs: list[dict[str, Any]] = []
 
     if flight_type == "one-way":
         leg_data = itinerary[0] if itinerary else {}
@@ -159,6 +161,13 @@ async def _apply_nonstop_filter(page) -> None:
         except Exception:
             pass
 
+    close_button = page.locator("button.VfPpkd-Bz112c-LgbsSe.yHy1rc.eT1oJ.mN1ivc.evEd9e.HJuSVb").first
+    if await close_button.count():
+        try:
+            await close_button.click()
+        except Exception:
+            pass
+
     await page.wait_for_timeout(400)
 
 
@@ -195,61 +204,35 @@ def _extract_stops(text: str) -> str:
     return ""
 
 
-async def _scrape_section(listitems, limit: int) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    if not listitems:
-        return results
-    count = min(await listitems.count(), limit)
-    for idx in range(count):
-        card = listitems.nth(idx)
-        aria_summary = (await card.get_attribute("aria-label")) or ""
-        try:
-            text_summary = (await card.inner_text()).strip()
-        except Exception:
-            text_summary = aria_summary
-
-        airline = ""
-        airline_loc = card.locator(".sSHqwe, .Ir0Voe")
-        if await airline_loc.count():
-            try:
-                airline = (await airline_loc.first.inner_text()).strip()
-            except Exception:
-                airline = ""
-
-        if not airline and aria_summary:
-            airline = aria_summary.split(",")[0].replace("Select", "").strip()
-
-        price = _extract_price(aria_summary or text_summary)
-        duration = _extract_duration(aria_summary or text_summary)
-        depart_time, arrive_time = _extract_times(aria_summary or text_summary)
-        stops = _extract_stops(aria_summary or text_summary)
-
-        results.append(
-            {
-                "airline": airline,
-                "price": price,
-                "duration": duration,
-                "depart_time": depart_time,
-                "arrival_time": arrive_time,
-                "stops": stops,
-                "summary": aria_summary or text_summary,
-            }
-        )
-    return results
-
-
-async def _scrape_section(items, limit: int) -> List[Dict[str, Any]]:
+async def _scrape_section(
+    items,
+    limit: int,
+    flight_number: str | None = None,
+    seats_available: str | None = None,
+) -> list[dict[str, Any]]:
     """
     Scrape flight information from a list of flight card items.
     """
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     count = min(await items.count(), limit)
 
     for idx in range(count):
         card = items.nth(idx)
         try:
             flight_data = await _extract_flight_data(card)
-            if flight_data:
+            if not flight_data:
+                continue
+            extra_details = await _extract_extra_flight_details(
+                card,
+                seats_available=seats_available or str(MAX_ADULTS),
+            )
+            if extra_details:
+                flight_data.update(extra_details)
+            if flight_number:
+                scraped_number = (flight_data.get("flight_number") or "").replace(" ", "").upper()
+                if scraped_number == flight_number.upper():
+                    results.append(flight_data)
+            else:
                 results.append(flight_data)
         except Exception as e:
             logger.error("Error scraping card %s: %s", idx, e, exc_info=True)
@@ -258,7 +241,7 @@ async def _scrape_section(items, limit: int) -> List[Dict[str, Any]]:
     return results
 
 
-async def _extract_flight_data(card) -> Dict[str, Any]:
+async def _extract_flight_data(card) -> dict[str, Any]:
     """
     Extract flight details from a single flight card element.
     Based on the structure in Sample LI.html
@@ -273,7 +256,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
         "origin": "",
         "destination": "",
         "emissions": "",
-        "summary": ""
+        "summary": "",
     }
 
     try:
@@ -286,7 +269,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract airline name
         # Look for airline name in the Ir0Voe div > sSHqwe span
-        airline_loc = card.locator('.Ir0Voe .sSHqwe').first
+        airline_loc = card.locator(".Ir0Voe .sSHqwe").first
         if await airline_loc.count():
             try:
                 flight_data["airline"] = (await airline_loc.inner_text()).strip()
@@ -295,7 +278,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # If airline not found, try alternate location
         if not flight_data["airline"]:
-            airline_alt = card.locator('.h1fkLb span').first
+            airline_alt = card.locator(".h1fkLb span").first
             if await airline_alt.count():
                 try:
                     flight_data["airline"] = (await airline_alt.inner_text()).strip()
@@ -303,10 +286,15 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract departure time
-        depart_time_loc = card.locator('.wtdjmc').first
+        depart_time_loc = card.locator(".wtdjmc").first
         if await depart_time_loc.count():
             try:
-                flight_data["depart_time"] = (await depart_time_loc.get_attribute("aria-label") or "").replace("Departure time: ", "").replace(".", "").strip()
+                flight_data["depart_time"] = (
+                    (await depart_time_loc.get_attribute("aria-label") or "")
+                    .replace("Departure time: ", "")
+                    .replace(".", "")
+                    .strip()
+                )
             except Exception:
                 try:
                     flight_data["depart_time"] = (await depart_time_loc.inner_text()).strip()
@@ -314,10 +302,15 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract arrival time
-        arrival_time_loc = card.locator('.XWcVob').first
+        arrival_time_loc = card.locator(".XWcVob").first
         if await arrival_time_loc.count():
             try:
-                flight_data["arrival_time"] = (await arrival_time_loc.get_attribute("aria-label") or "").replace("Arrival time: ", "").replace(".", "").strip()
+                flight_data["arrival_time"] = (
+                    (await arrival_time_loc.get_attribute("aria-label") or "")
+                    .replace("Arrival time: ", "")
+                    .replace(".", "")
+                    .strip()
+                )
             except Exception:
                 try:
                     flight_data["arrival_time"] = (await arrival_time_loc.inner_text()).strip()
@@ -325,7 +318,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract origin airport code
-        origin_loc = card.locator('.G2WY5c').first
+        origin_loc = card.locator(".G2WY5c").first
         if await origin_loc.count():
             try:
                 flight_data["origin"] = (await origin_loc.inner_text()).strip()
@@ -333,7 +326,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract destination airport code
-        dest_loc = card.locator('.c8rWCd').first
+        dest_loc = card.locator(".c8rWCd").first
         if await dest_loc.count():
             try:
                 flight_data["destination"] = (await dest_loc.inner_text()).strip()
@@ -342,7 +335,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract duration and stops information
         # Duration is in aria-label format: "Total duration 13 hr 20 min"
-        duration_loc = card.locator('.gvkrdb').first
+        duration_loc = card.locator(".gvkrdb").first
         if await duration_loc.count():
             try:
                 duration_aria = await duration_loc.get_attribute("aria-label")
@@ -354,7 +347,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract stops information
-        stops_loc = card.locator('.EfT7Ae span').first
+        stops_loc = card.locator(".EfT7Ae span").first
         if await stops_loc.count():
             try:
                 stops_aria = await stops_loc.get_attribute("aria-label")
@@ -367,7 +360,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # If stops not found, try alternate location
         if not flight_data["stops"]:
-            stops_alt = card.locator('.VG3hNb').first
+            stops_alt = card.locator(".VG3hNb").first
             if await stops_alt.count():
                 try:
                     flight_data["stops"] = (await stops_alt.inner_text()).strip()
@@ -376,7 +369,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract price
         # Price is in the YMlIz FpEdX jLMuyc span with aria-label
-        price_loc = card.locator('.YMlIz.FpEdX.jLMuyc span[aria-label]').first
+        price_loc = card.locator(".YMlIz.FpEdX.jLMuyc span[aria-label]").first
         if await price_loc.count():
             try:
                 price_aria = await price_loc.get_attribute("aria-label")
@@ -388,7 +381,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract emissions data
-        emissions_loc = card.locator('.AdWm1c.lc3qH').first
+        emissions_loc = card.locator(".AdWm1c.lc3qH").first
         if await emissions_loc.count():
             try:
                 flight_data["emissions"] = (await emissions_loc.inner_text()).strip()
@@ -401,156 +394,128 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
     return flight_data
 
 
-async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Scrape results grouped into top_flights and other_flights using the tabpanel
-    inside the main results container. Falls back to a flat list under 'all' if
-    sections are not found.
-    """
-    top_flights: List[Dict[str, Any]] = []
-    other_flights: List[Dict[str, Any]] = []
-
-    # Find visible tabpanel inside the main results container.
-    main_panels = page.locator("div.FXkZv[role='main'] div.eQ35Ce div[role='tabpanel']")
-    panel = None
+async def _extract_extra_flight_details(card, seats_available: str) -> dict[str, Any]:
+    details = {}
     try:
-        count = await main_panels.count()
-        for i in range(count):
-            candidate = main_panels.nth(i)
+        toggle = card.locator("svg.SadNne.NMm5M").first
+        if await toggle.count():
             try:
-                if await candidate.is_visible():
-                    panel = candidate
-                    break
+                await toggle.dispatch_event("click")
+                await card.page.wait_for_timeout(200)
             except Exception:
-                continue
+                pass
+
+        extra_details = card.locator("div.MX5RWe.sSHqwe.y52p7d").first
+        if not await extra_details.count():
+            return details
+
+        try:
+            class_text = (await extra_details.locator('span[jsname="Pvlywd"]').first.inner_text()).strip()
+            if class_text:
+                details["class"] = class_text
+        except Exception:
+            pass
+
+        try:
+            flight_number = (await extra_details.locator("span.Xsgmwe.QS0io").first.inner_text()).strip()
+            if flight_number:
+                details["flight_number"] = re.sub(r"\s+", "", flight_number.replace("\xa0", " "))
+        except Exception:
+            pass
+
+        try:
+            aircraft_nodes = await extra_details.locator("span.Xsgmwe").all_inner_texts()
+            aircraft_nodes = [t.strip() for t in aircraft_nodes if t and t.strip()]
+            if details.get("flight_number"):
+                aircraft_nodes = [t for t in aircraft_nodes if re.sub(r"\s+", "", t) != details["flight_number"]]
+            if aircraft_nodes:
+                details["aircraft"] = aircraft_nodes[-1].replace("\xa0", " ").strip()
+        except Exception:
+            pass
+
+        details["seats_available"] = seats_available
     except Exception:
+        return details
+
+    return details
+
+
+async def _scrape_results(
+    page,
+    limit: int = 30,
+    flight_number: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Scrape results grouped into top_flights using the tabpanel inside the main
+    results container. Falls back to a flat list if sections are not found.
+    """
+    top_flights: list[dict[str, Any]] = []
+    adults = MAX_ADULTS
+
+    while True:
+        # Find visible tabpanel inside the main results container.
+        main_panels = page.locator("div.FXkZv[role='main'] div.eQ35Ce div[role='tabpanel']")
         panel = None
+        try:
+            count = await main_panels.count()
+            for i in range(count):
+                candidate = main_panels.nth(i)
+                try:
+                    if await candidate.is_visible():
+                        panel = candidate
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            panel = None
 
-    if panel:
-        # Identify child sections; two of them should contain the lists.
-        sections = panel.locator("> div")
-        sec_count = await sections.count()
         found_top = None
-        found_other = None
+        if panel:
+            sections = panel.locator("> div")
+            sec_count = await sections.count()
 
-        for i in range(sec_count):
-            sec = sections.nth(i)
-            heading = sec.get_by_role("heading").first
-            label = ""
-            try:
-                if await heading.count():
-                    label = (await heading.inner_text()).strip()
-            except Exception:
+            for i in range(sec_count):
+                sec = sections.nth(i)
+                heading = sec.get_by_role("heading").first
                 label = ""
+                try:
+                    if await heading.count():
+                        label = (await heading.inner_text()).strip()
+                except Exception:
+                    label = ""
 
-            # Look for list items - try ul > li structure first
-            items = sec.locator("ul li.pIav2d")
-            if not await items.count():
-                items = sec.locator("li.pIav2d")
-            if not await items.count():
-                items = sec.locator("ul li[role='listitem']")
-            if not await items.count():
-                items = sec.locator("li[role='listitem']")
+                items = sec.locator("ul li.pIav2d")
+                if not await items.count():
+                    items = sec.locator("li.pIav2d")
+                if not await items.count():
+                    items = sec.locator("ul li[role='listitem']")
+                if not await items.count():
+                    items = sec.locator("li[role='listitem']")
 
-            if re.search(r"top flight", label, re.I):
-                found_top = items
-            elif re.search(r"other flight", label, re.I):
-                found_other = items
-            elif found_top is None and await items.count():
-                found_top = items
-            elif found_other is None and await items.count():
-                found_other = items
+                if re.search(r"top flight", label, re.I):
+                    found_top = items
+                elif found_top is None and await items.count():
+                    found_top = items
 
         if found_top:
-            logger.info("Found %s top flights", await found_top.count())
-            top_flights = await _scrape_section(found_top, limit)
-        if found_other:
-            logger.info("Found %s other flights", await found_other.count())
-            other_flights = await _scrape_section(found_other, limit)
-
-    all_flights: List[Dict[str, Any]] = []
-    if not top_flights and not other_flights:
-        logger.info("No sections found, trying flat list scrape")
-        selectors = [
-            "div.FXkZv[role='main'] li.pIav2d",
-            "li.pIav2d",
-            "div.FXkZv[role='main'] li[role='listitem']",
-            "[aria-label*='Results list'] div[role='listitem']",
-            "ul[role='listbox'] li[role='listitem']",
-            "li[role='listitem']",
-            "[aria-label*='Flight result']",
-        ]
-        cards = None
-        for sel in selectors:
-            loc = page.locator(sel)
-            if await loc.count():
-                logger.info("Found %s flights using selector: %s", await loc.count(), sel)
-                cards = loc
+            logger.info("Found %s top flights (adults=%s)", await found_top.count(), adults)
+            top_flights = await _scrape_section(
+                found_top,
+                limit,
+                flight_number=flight_number,
+                seats_available=str(adults),
+            )
+            if not flight_number or top_flights:
                 break
-        if cards:
-            all_flights = await _scrape_section(cards, limit)
 
-    return {"top_flights": top_flights, "other_flights": other_flights, "all": all_flights}
+        if adults <= 1:
+            top_flights = []
+            break
 
-def _age_from_dob(dob_str: str) -> Optional[int]:
-    if not dob_str:
-        return None
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
-        try:
-            born = datetime.strptime(dob_str, fmt).date()
-            today = date.today()
-            years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
-            return years
-        except Exception:
-            continue
-    return None
+        adults = await _decrement_adults(page, adults)
+        await _wait_for_results(page, timeout_ms=12000)
 
-
-def _compute_passenger_clicks(input_data: Dict[str, Any]) -> Dict[str, int]:
-    traveller = input_data.get("traveller") or []
-    partners = input_data.get("travel_partner") or []
-
-    adults = max(len(traveller), 1)  # Google defaults to 1 adult
-    children = 0
-    infant_seat = 0
-    infant_lap = 0
-
-    for partner in partners:
-        own_seat = partner.get("own_seat", True)
-        p_type = (partner.get("type") or "").lower()
-        if p_type == "adult":
-            if own_seat:
-                adults += 1
-            continue
-
-        if p_type == "child":
-            age = _age_from_dob(partner.get("dob", ""))
-            if age is None:
-                # Assume child if unknown age and has seat
-                if own_seat:
-                    children += 1
-                continue
-
-            if age < 2:
-                if own_seat:
-                    infant_seat += 1
-                else:
-                    infant_lap += 1
-            elif 2 <= age <= 11:
-                if own_seat:
-                    children += 1
-            else:
-                if own_seat:
-                    adults += 1
-
-    # Convert totals to "add" counts (Google already has 1 adult selected)
-    add_adults = max(adults - 1, 0)
-    return {
-        "adult": add_adults,
-        "child": children,
-        "infant_seat": infant_seat,
-        "infant_lap": infant_lap,
-    }
+    return {"top_flights": top_flights}
 
 
 async def _wait_for_results(page, timeout_ms: int = 15000) -> None:
@@ -672,7 +637,9 @@ async def _fill_leg_row(page, idx: int, origin: str, destination: str, date_str:
             else:
                 candidate_rows = page.locator(config.GF_LEG_ROW)
             row_count = await candidate_rows.count()
-            logger.info(f"Strategy 1.{idx_container} (GF_LEG_ROW via container {idx_container}): found {row_count} rows")
+            logger.info(
+                f"Strategy 1.{idx_container} (GF_LEG_ROW via container {idx_container}): found {row_count} rows"
+            )
             if row_count > 0:
                 rows = candidate_rows
                 break
@@ -733,7 +700,8 @@ async def _fill_leg_row(page, idx: int, origin: str, destination: str, date_str:
             except Exception:
                 try:
                     await date_field.evaluate(
-                        "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                        """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true })); }""",
                         _iso_date(date_str),
                     )
                 except Exception:
@@ -786,7 +754,7 @@ async def _fill_simple_field(locator, value: str) -> None:
         overlay_input = None
         try:
             # The focused element is usually the correct input
-            overlay_input = page_obj.locator(':focus').first
+            overlay_input = page_obj.locator(":focus").first
             if await overlay_input.count() > 0 and await overlay_input.is_visible():
                 logger.debug("Found focused input")
             else:
@@ -898,7 +866,7 @@ async def _fill_simple_field(locator, value: str) -> None:
             if not option:
                 try:
                     logger.debug("Trying text-based search for: %s", code)
-                    all_options = page_obj.locator(f'li[role="option"]:visible')
+                    all_options = page_obj.locator('li[role="option"]:visible')
                     count = await all_options.count()
                     logger.debug("Found %s visible options total", count)
 
@@ -949,6 +917,7 @@ async def _fill_simple_field(locator, value: str) -> None:
     except Exception as e:
         logger.error("Error filling field with value '%s': %s", value, e, exc_info=True)
 
+
 async def _fill_basic_form(
     page,
     origin: str,
@@ -969,9 +938,17 @@ async def _fill_basic_form(
     rows = fields_container.locator(config.GF_LEG_ROW)
     row = rows.first if await rows.count() else fields_container
 
-    from_field = row.locator(config.GF_FROM_INPUT).first if await row.locator(config.GF_FROM_INPUT).count() else page.locator(config.GF_FROM_INPUT).first
+    from_field = (
+        row.locator(config.GF_FROM_INPUT).first
+        if await row.locator(config.GF_FROM_INPUT).count()
+        else page.locator(config.GF_FROM_INPUT).first
+    )
 
-    to_field = row.locator(config.GF_TO_INPUT).first if await row.locator(config.GF_TO_INPUT).count() else page.locator(config.GF_TO_INPUT).first
+    to_field = (
+        row.locator(config.GF_TO_INPUT).first
+        if await row.locator(config.GF_TO_INPUT).count()
+        else page.locator(config.GF_TO_INPUT).first
+    )
 
     await _fill_simple_field(from_field, origin)
     logger.info("Filled origin: %s", origin)
@@ -997,7 +974,8 @@ async def _fill_basic_form(
         except Exception:
             try:
                 await depart_field.evaluate(
-                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                    """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); 
+                    el.dispatchEvent(new Event('change', { bubbles: true })); }""",
                     _iso_date(depart_date),
                 )
             except Exception:
@@ -1034,7 +1012,8 @@ async def _fill_basic_form(
             except Exception:
                 try:
                     await ret_field.evaluate(
-                        "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                        """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); 
+                        el.dispatchEvent(new Event('change', { bubbles: true })); }""",
                         _iso_date(return_date),
                     )
                 except Exception:
@@ -1044,11 +1023,11 @@ async def _fill_basic_form(
 
 async def scrape_basic_form(
     page,
-    leg: Dict[str, Any],
+    leg: dict[str, Any],
     flight_type: str,
     nonstop_only: bool,
     limit: int,
-) -> Dict[str, Any] | None:
+) -> dict[str, Any] | None:
     try:
         await page.goto("https://www.google.com/travel/flights")
     except Exception:
@@ -1104,16 +1083,18 @@ async def scrape_basic_form(
     }
 
 
-async def _select_passengers(page, input_data: Dict[str, Any]) -> None:
-    counts = _compute_passenger_clicks(input_data)
+async def _max_adults(page) -> None:
     form = page.locator(config.GF_FORM_CONTAINER).first
     if not await form.count():
         form = page
+
     pax_toggle = form.locator(config.GF_PASSENGER_TOGGLE).first
     if not await pax_toggle.count():
         pax_toggle = page.get_by_role("button", name=re.compile("passenger|traveler|adult", re.I))
+
     if not await pax_toggle.count():
         return
+
     try:
         await pax_toggle.click()
         await page.wait_for_timeout(200)
@@ -1123,24 +1104,15 @@ async def _select_passengers(page, input_data: Dict[str, Any]) -> None:
     def _button(selector: str):
         return page.locator(selector).first
 
-    mapping = {
-        "adult": config.GF_PAX_ADD_ADULT,
-        "child": config.GF_PAX_ADD_CHILD,
-        "infant_seat": config.GF_PAX_ADD_INFANT_SEAT,
-        "infant_lap": config.GF_PAX_ADD_INFANT_LAP,
-    }
-
-    for key, selector in mapping.items():
-        clicks = counts.get(key, 0)
-        btn = _button(selector)
-        for _ in range(clicks):
-            if not await btn.count():
-                break
-            try:
-                await btn.click()
-                await page.wait_for_timeout(120)
-            except Exception:
-                break
+    btn = _button(config.GF_PAX_ADD_ADULT)
+    for _ in range(MAX_ADULTS - 1):
+        if not await btn.count():
+            break
+        try:
+            await btn.click()
+            await page.wait_for_timeout(120)
+        except Exception:
+            break
 
     # Close the dialog if a close/done exists; otherwise press Escape.
     done = page.get_by_role("button", name=re.compile("Done|Close|Save", re.I))
@@ -1155,6 +1127,61 @@ async def _select_passengers(page, input_data: Dict[str, Any]) -> None:
         except Exception:
             pass
     await page.wait_for_timeout(200)
+
+
+async def _decrement_adults(page, current: int) -> int:
+    if current <= 1:
+        return current
+
+    form = page.locator(config.GF_FORM_CONTAINER).first
+    if not await form.count():
+        form = page
+
+    pax_toggle = form.locator(config.GF_PASSENGER_TOGGLE).first
+    if not await pax_toggle.count():
+        pax_toggle = page.get_by_role("button", name=re.compile("passenger|traveler|adult", re.I))
+
+    if not await pax_toggle.count():
+        return current
+
+    try:
+        await pax_toggle.click()
+        await page.wait_for_timeout(200)
+    except Exception:
+        return current
+
+    row = page.locator("div:has-text('Adults')").first
+    minus = None
+    if await row.count():
+        minus = row.locator(
+            "button[aria-label*='decrease' i], button[aria-label*='remove' i], button[aria-label*='minus' i]"
+        ).first
+        if not await minus.count():
+            minus = row.locator("button").first
+    else:
+        minus = page.locator(
+            "button[aria-label*='decrease' i], button[aria-label*='remove' i], button[aria-label*='minus' i]"
+        ).first
+    try:
+        if minus and await minus.count():
+            await minus.click()
+            current -= 1
+    except Exception:
+        pass
+
+    done = page.get_by_role("button", name=re.compile("Done|Close|Save", re.I))
+    if await done.count():
+        try:
+            await done.click()
+        except Exception:
+            pass
+    else:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+    await page.wait_for_timeout(200)
+    return current
 
 
 async def _select_seat_class(page, seat_class: str) -> None:
@@ -1201,13 +1228,18 @@ async def _select_seat_class(page, seat_class: str) -> None:
 
 
 async def run(headless: bool, input_path: str, output: Path, limit: int, screenshot: str | None) -> None:
-    logger.info("Starting Google Flights run headless=%s input=%s limit=%s", headless, input_path, limit)
+    logger.info(
+        "Starting Google Flights run headless=%s input=%s limit=%s",
+        headless,
+        input_path,
+        limit,
+    )
     input_data = read_input(input_path)
     legs, flight_type = build_legs(input_data)
     logger.info("Prepared %s leg(s) for flight_type=%s", len(legs), flight_type)
     nonstop_only = bool(input_data.get("nonstop_flights"))
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
@@ -1220,12 +1252,16 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
 
         # Set trip type, passengers, seat class
         await _switch_trip_type(page, flight_type)
-        await _select_passengers(page, input_data)
+        await _max_adults(page)
         seat_class = ""
         if input_data.get("itinerary"):
             seat_class = input_data["itinerary"][0].get("class", "")
         await _select_seat_class(page, seat_class)
-        logger.info("Configured trip type=%s passengers seat_class=%s", flight_type, seat_class or "default")
+        logger.info(
+            "Configured trip type=%s passengers seat_class=%s",
+            flight_type,
+            seat_class or "default",
+        )
 
         if flight_type == "multiple-legs" and len(legs) > 1:
             logger.info("Filling %s multi-city legs", len(legs))
@@ -1240,7 +1276,12 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
                 )
         else:
             leg = legs[0]
-            logger.info("Filling basic form for %s -> %s on %s", leg.get("origin"), leg.get("destination"), leg.get("depart_date"))
+            logger.info(
+                "Filling basic form for %s -> %s on %s",
+                leg.get("origin"),
+                leg.get("destination"),
+                leg.get("depart_date"),
+            )
             await _fill_basic_form(
                 page,
                 leg.get("origin", ""),
@@ -1273,15 +1314,14 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
             except PlaywrightTimeout:
                 pass
 
-        flights = await _scrape_results(page, limit=limit)
+        flight_number = (input_data.get("flight_number") or "").replace(" ", "").upper()
+        flights = await _scrape_results(page, limit=limit, flight_number=flight_number or None)
         logger.info(
-            "Scraped flights: top=%s other=%s all=%s",
+            "Scraped flights: top=%s",
             len(flights.get("top_flights", [])),
-            len(flights.get("other_flights", [])),
-            len(flights.get("all", [])),
         )
         if not any(flights.values()):
-            flights = {"top_flights": [], "other_flights": [], "all": []}
+            flights = {"top_flights": []}
         results.append(
             {
                 "type": "multi-city" if flight_type == "multiple-legs" and len(legs) > 1 else flight_type,
