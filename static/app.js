@@ -26,6 +26,13 @@ const inputSourceJson = document.getElementById("input-source-json");
 const formInputSection = document.getElementById("form-input-section");
 const jsonInputSection = document.getElementById("json-input-section");
 const headedToggle = document.getElementById("headed-toggle");
+const findFlightToggle = document.getElementById("find-flight-toggle");
+const findFlightContent = document.getElementById("find-flight-content");
+const defaultContent = document.getElementById("default-content");
+const findFlightAirlineSelect = document.getElementById("find-flight-airline");
+const findFlightForm = document.getElementById("find-flight-form");
+const findFlightResults = document.getElementById("find-flight-results");
+const findFlightHeadedToggle = document.getElementById("find-flight-headed-toggle");
 
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
 const timeOptions = Array.from(
@@ -265,6 +272,138 @@ function setInputMode() {
   }
 }
 
+function buildFindFlightPayload() {
+  const flightNumber = document.getElementById("find-flight-code")?.value.trim();
+  const flightType = document.getElementById("find-flight-type")?.value.trim();
+  const airline = document.getElementById("find-flight-airline")?.value.trim();
+  const origin = document.getElementById("find-flight-origin")?.value.trim();
+  const destination = document.getElementById("find-flight-destination")?.value.trim();
+  const date = document.getElementById("find-flight-date")?.value;
+  const time = document.getElementById("find-flight-time")?.value.trim();
+  const travelClass = document.getElementById("find-flight-class")?.value.trim();
+
+  const missing = [];
+  if (!flightNumber) missing.push("Flight Number is required.");
+  if (!flightType) missing.push("Flight Type is required.");
+  const airlineValue = airline || "";
+  if (!origin) missing.push("Origin is required.");
+  if (!destination) missing.push("Destination is required.");
+  if (!date) missing.push("Date is required.");
+  if (!time) missing.push("Time is required.");
+  if (!travelClass) missing.push("Class is required.");
+  if (missing.length) {
+    missing.forEach((msg) => showToast(msg));
+    throw new Error("Missing required fields.");
+  }
+
+  return {
+    input: {
+      flight_type: flightType,
+      nonstop_flights: document.getElementById("find-flight-nonstop")?.checked || false,
+      airline: airlineValue,
+      travel_status: "Bookable",
+      trips: [{ origin, destination }],
+      itinerary: [{ date: isoToMmddyyyy(date), time, class: travelClass }],
+      flight_number: flightNumber.replace(/\s+/g, ""),
+    },
+    headed: document.getElementById("find-flight-headed")?.checked || false,
+  };
+}
+
+function renderFindFlightCard(data, title, isStaff) {
+  if (!data) {
+    return `
+      <div class="dashboard-card">
+        <div class="status-header">
+          <div class="flight-meta">
+            <span class="airline-tag">${title}</span>
+            <span class="on-time">● NO DATA</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const airline = data.airline || "Unknown Airline";
+  const flightNumber = data.flight_number || data.flightNumber || "N/A";
+  const origin = data.origin || "N/A";
+  const destination = data.destination || "N/A";
+  const depart = data.depart_time || data.departure_time || data.time || "N/A";
+  const arrive = data.arrival_time || data.arrival || "N/A";
+  const aircraft = data.aircraft || "N/A";
+  const duration = data.duration || "N/A";
+
+  let loadsHtml = "";
+  if (isStaff && data.seats) {
+    loadsHtml = `
+      <div class="loads-container">
+        <span class="section-label">Staff Availability (Loads)</span>
+        <div class="loads-grid">
+          <div class="load-pill">
+            <span>BUSINESS</span>
+            <strong class="load-low">${data.seats.bus || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>ECONOMY</span>
+            <strong class="load-high">${data.seats.eco || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>NON-REV</span>
+            <strong>${data.seats.non_rev || "-"}</strong>
+          </div>
+        </div>
+      </div>
+    `;
+  } else {
+    loadsHtml = `
+      <div class="loads-container">
+        <span class="section-label">Commercial Details</span>
+        <div class="loads-grid">
+          <div class="load-pill">
+            <span>SEATS</span>
+            <strong>${data.seats_available || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>STOPS</span>
+            <strong>${data.stops || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>EMISSIONS</span>
+            <strong>${data.emissions || "-"}</strong>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="dashboard-card">
+      <div class="status-header">
+        <div class="flight-meta">
+          <span class="airline-tag">${title}: ${airline} · ${flightNumber}</span>
+          <span class="on-time">● ON TIME</span>
+        </div>
+        <div class="timeline">
+          <div class="node">
+            <h2>${origin}</h2>
+            <p>${depart}</p>
+          </div>
+          <div class="line"></div>
+          <div class="node">
+            <h2>${destination}</h2>
+            <p>${arrive}</p>
+          </div>
+        </div>
+      </div>
+      ${loadsHtml}
+      <div class="footer-info">
+        <span><strong>Aircraft:</strong> ${aircraft}</span>
+        <span><strong>Duration:</strong> ${duration}</span>
+      </div>
+    </div>
+  `;
+}
+
 async function startRun(event) {
   event.preventDefault();
   logFeed.innerHTML = "";
@@ -302,6 +441,41 @@ async function startRun(event) {
   runIdEl.textContent = currentRunId ? `Run ${currentRunId}` : "";
   appendLog(`Run started (${currentRunId})`);
   connectWebSocket(currentRunId);
+}
+
+async function startFindFlight(event) {
+  event?.preventDefault();
+  if (!findFlightResults) return;
+  findFlightResults.classList.remove("empty-state");
+  findFlightResults.innerHTML = "Searching for matching flight details...";
+  let payload;
+  try {
+    payload = buildFindFlightPayload();
+  } catch (err) {
+    return;
+  }
+
+  const res = await fetch("/api/find-flight", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok || data.status === "error") {
+    showToast("Find Flight failed. Check server logs.");
+    findFlightResults.classList.add("empty-state");
+    findFlightResults.textContent = "Run a search to load flight details.";
+    return;
+  }
+
+  const googleEntry = (data.google_flights || [])[0];
+  const googleFlight = googleEntry?.flights?.top_flights?.[0] || null;
+  const staffFlight = (data.stafftraveler || [])[0] || null;
+
+  findFlightResults.innerHTML = `
+    ${renderFindFlightCard(googleFlight, "Google Flights", false)}
+    ${renderFindFlightCard(staffFlight, "StaffTraveler", true)}
+  `;
 }
 
 function connectWebSocket(runId) {
@@ -743,12 +917,33 @@ async function loadAirlines() {
       opt.disabled = item.disabled;
       airlineSelect.appendChild(opt);
     });
+    if (findFlightAirlineSelect) {
+      findFlightAirlineSelect.innerHTML = "";
+      const blankFind = document.createElement("option");
+      blankFind.value = "";
+      blankFind.textContent = "Select airline (optional)";
+      findFlightAirlineSelect.appendChild(blankFind);
+      data.forEach((item) => {
+        const opt = document.createElement("option");
+        opt.value = item.value;
+        opt.textContent = item.label || item.value;
+        opt.disabled = item.disabled;
+        findFlightAirlineSelect.appendChild(opt);
+      });
+    }
   } catch (err) {
     airlineSelect.innerHTML = "";
     const opt = document.createElement("option");
     opt.value = "";
     opt.textContent = "Airlines unavailable";
     airlineSelect.appendChild(opt);
+    if (findFlightAirlineSelect) {
+      findFlightAirlineSelect.innerHTML = "";
+      const fallbackOpt = document.createElement("option");
+      fallbackOpt.value = "";
+      fallbackOpt.textContent = "Airlines unavailable";
+      findFlightAirlineSelect.appendChild(fallbackOpt);
+    }
     appendLog("Could not load airlines.json: " + err.message);
   }
 }
@@ -772,6 +967,8 @@ fileInput.addEventListener("change", (e) => {
 downloadJsonBtn.addEventListener("click", () => download("json"));
 downloadXlsxBtn.addEventListener("click", () => download("excel"));
 form.addEventListener("submit", startRun);
+findFlightForm?.addEventListener("submit", startFindFlight);
+document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
 inputSourceForm?.addEventListener("change", setInputMode);
 inputSourceJson?.addEventListener("change", setInputMode);
@@ -801,5 +998,16 @@ setInputMode();
 const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 if (headedToggle && !isDevHost) {
   headedToggle.style.display = "none";
+}
+if (findFlightHeadedToggle && !isDevHost) {
+  findFlightHeadedToggle.style.display = "none";
+}
+if (findFlightToggle && findFlightContent && defaultContent) {
+  findFlightToggle.addEventListener("click", () => {
+    const showFind = findFlightContent.style.display === "none";
+    findFlightContent.style.display = showFind ? "block" : "none";
+    defaultContent.style.display = showFind ? "none" : "grid";
+    findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
+  });
 }
 appendLog("Ready. Fill the form or drop a JSON payload.");

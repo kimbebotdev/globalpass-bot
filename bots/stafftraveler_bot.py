@@ -5,12 +5,13 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Optional
 
 from dotenv import load_dotenv
-from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -27,10 +28,10 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+_notify_callback: Callable[[str], Awaitable[None]] | None = None
 
 
-def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+def set_notifier(callback: Callable[[str], Awaitable[None]] | None) -> None:
     global _notify_callback
     _notify_callback = callback
 
@@ -45,8 +46,7 @@ async def _notify_message(message: str) -> None:
 
 LOGIN_URL = "https://stafftraveler.app/login"
 STEALTH_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
 
 
@@ -186,8 +186,8 @@ async def _scrape_results(page) -> list[dict]:
 
     return results
 
-async def _pick_date_from_calendar(page, field_selector: str, date_str: str) -> None:
 
+async def _pick_date_from_calendar(page, field_selector: str, date_str: str) -> None:
     await close_date_selection_ui(page)
 
     if not date_str:
@@ -240,12 +240,11 @@ async def _pick_date_from_calendar(page, field_selector: str, date_str: str) -> 
         pass
 
     exact_label = f"{target.strftime('%B')} {target.day}, {target.year}"
-    day_btn = calendar.locator(f'button[aria-label="{exact_label}"]').first
-    if not await day_btn.count():
-        day_btn = calendar.locator(
-            "button.react-calendar__tile",
-            has=page.locator("abbr", has_text=str(target.day)),
-        ).filter(has_text=str(target.day)).first
+    day_btn = (
+        calendar.locator(f'button[aria-label="{exact_label}"]')
+        .or_(calendar.locator("button.react-calendar__tile", has=page.locator(f'abbr[aria-label="{exact_label}"]')))
+        .first
+    )
 
     clicked = False
     try:
@@ -268,7 +267,7 @@ async def _set_value_direct(page, selector: str, value: str) -> None:
 
     if not value:
         return
-    
+
     field = page.locator(selector).first
     if not await field.count():
         return
@@ -314,9 +313,10 @@ async def close_date_selection_ui(page):
         try:
             await close_date_button.click()
             await page.wait_for_timeout(500)
-        
+
         except Exception:
             pass
+
 
 # End of close_date_selection_ui
 
@@ -408,17 +408,14 @@ async def perform_stafftraveller_login(
 
         if not email_field:
             raise SystemExit("Could not find email address field")
-        
+
         await email_field.click()
         await email_field.fill("")
         await email_field.type(username)
 
         btn_continue = await _wait_for_first_locator(
             page,
-            [
-                "#continue",
-                'button[type="button"]'
-            ],
+            ["#continue", 'button[type="button"]'],
             timeout_ms=6000,
         )
         if btn_continue:
@@ -446,9 +443,7 @@ async def perform_stafftraveller_login(
 
         login_button = await _first_locator(
             page,
-            [
-                '#login-with-password'
-            ],
+            ["#login-with-password"],
         )
         if login_button:
             await login_button.click()
@@ -489,7 +484,12 @@ async def perform_stafftraveller_login(
             await perform_flight_search(page, input_data)
 
         if screenshot:
-            await page.screenshot(path=screenshot, full_page=True)
+            try:
+                screenshot_path = Path(screenshot)
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+            except Exception:
+                pass
 
         await context.storage_state(path=storage_path)
         logger.info("StaffTraveler login/search complete; storage saved to %s", storage_path)

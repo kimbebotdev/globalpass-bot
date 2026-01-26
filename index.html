@@ -21,27 +21,138 @@
           <span class="chip">Automated Flight Search</span>
         </div>
       </div>
-      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
-        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="5"></circle>
-          <line x1="12" y1="1" x2="12" y2="3"></line>
-          <line x1="12" y1="21" x2="12" y2="23"></line>
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-          <line x1="1" y1="12" x2="3" y2="12"></line>
-          <line x1="21" y1="12" x2="23" y2="12"></line>
-          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-        </svg>
-        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-        </svg>
-      </button>
+      <div class="header-actions">
+        <button type="button" id="find-flight-toggle" class="ghost">Search Flight Number</button>
+        <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+          <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+      </div>
     </header>
 
-    <div class="main-grid">
+    <div id="find-flight-content" style="display: none;">
+      <div class="main-grid find-flight-grid">
+        <div class="left-panel">
+          <div class="panel">
+            <div class="status-row">
+              <h3>Search Flight Number</h3>
+              <div style="flex: 1;"></div>
+              <label class="switch-container" id="find-flight-headed-toggle">
+                <span class="switch-label">Show Browser</span>
+                <input type="checkbox" id="find-flight-headed" class="switch-input">
+                <span class="switch-slider"></span>
+              </label>
+            </div>
+            <form id="find-flight-form">
+              <div class="field-grid">
+                <label>Flight Number
+                  <input type="text" id="find-flight-code" placeholder="e.g. SQ495" required>
+                </label>
+                <label>Flight Type
+                  <select id="find-flight-type" required>
+                    <option value="one-way" selected>One-way</option>
+                    <option value="round-trip">Round trip</option>
+                    <option value="multiple-legs">Multiple legs / Multi-city</option>
+                  </select>
+                </label>
+                <label>Airline
+                  <select id="find-flight-airline">
+                    <option value="">Loading...</option>
+                  </select>
+                </label>
+                <label style="flex-direction: row; align-items: center; gap: 10px;">
+                  <input id="find-flight-nonstop" type="checkbox">
+                  <span>Non-stop only</span>
+                </label>
+              </div>
+              <div class="leg-header">
+                <div>
+                  <div class="leg-title">Leg 1</div>
+                  <div class="leg-subtitle">Optional details to refine the search.</div>
+                </div>
+              </div>
+              <div class="leg-grid">
+                <label>Origin
+                  <input type="text" id="find-flight-origin" placeholder="e.g. DXB" required>
+                </label>
+                <label>Destination
+                  <input type="text" id="find-flight-destination" placeholder="e.g. SIN" required>
+                </label>
+                <label>Date
+                  <input type="date" id="find-flight-date" required>
+                </label>
+                <label>Time
+                  <select id="find-flight-time" required>
+                    <option value="00:00">00:00</option>
+                    <option value="01:00">01:00</option>
+                    <option value="02:00">02:00</option>
+                    <option value="03:00">03:00</option>
+                    <option value="04:00">04:00</option>
+                    <option value="05:00">05:00</option>
+                    <option value="06:00">06:00</option>
+                    <option value="07:00">07:00</option>
+                    <option value="08:00">08:00</option>
+                    <option value="09:00">09:00</option>
+                    <option value="10:00">10:00</option>
+                    <option value="11:00">11:00</option>
+                    <option value="12:00">12:00</option>
+                    <option value="13:00">13:00</option>
+                    <option value="14:00">14:00</option>
+                    <option value="15:00">15:00</option>
+                    <option value="16:00">16:00</option>
+                    <option value="17:00">17:00</option>
+                    <option value="18:00">18:00</option>
+                    <option value="19:00">19:00</option>
+                    <option value="20:00">20:00</option>
+                    <option value="21:00">21:00</option>
+                    <option value="22:00">22:00</option>
+                    <option value="23:00">23:00</option>
+                  </select>
+                </label>
+                <label>Class
+                  <select id="find-flight-class" required>
+                    <option value="Economy">Economy</option>
+                    <option value="Premium Economy">Premium Economy</option>
+                    <option value="Business">Business</option>
+                    <option value="First">First</option>
+                  </select>
+                </label>
+              </div>
+              <div class="actions">
+                <div style="flex:1"></div>
+                <button class="primary" type="button" id="find-flight-search">Search Flight</button>
+              </div>
+            </form>
+          </div>
+        </div>
+        <div class="right-panel">
+          <div class="panel">
+            <div class="status-row">
+              <h3>Flight Details</h3>
+            </div>
+            <div id="find-flight-results" class="empty-state">
+              Run a search to load flight details.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="main-grid" id="default-content">
       <!-- Left Panel - Flight Details -->
       <div class="left-panel">
         <div class="panel">
