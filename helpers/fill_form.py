@@ -79,13 +79,9 @@ async def fill_form(
     departure: str,
     airline: str,
 ) -> None:
-    storage_file = Path("auth_state.json")
-    if not storage_file.exists():
-        raise SystemExit("auth_state.json not found. Run main.py first to create it.")
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(storage_state=str(storage_file))
+        context = await browser.new_context()
         page = await context.new_page()
 
         home_url = await goto_home(page)
@@ -143,7 +139,6 @@ async def fill_form(
             print(f"Error capturing flightschedule response: {exc}")
 
         await page.wait_for_timeout(1000)
-        await context.storage_state(path="auth_state.json")
         await browser.close()
 
 

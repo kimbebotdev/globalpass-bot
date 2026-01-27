@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
 from sqlmodel import Session, create_engine
 
-from models import BotResponse, Run
+from models import LookupBotResponse, Run, StandbyBotResponse
 
 load_dotenv()
 
@@ -40,6 +40,7 @@ def create_run_record(
     input_data: dict[str, Any],
     output_dir: Path,
     status: str = "pending",
+    run_type: str = "standard",
     slack_channel: str | None = None,
     slack_thread_ts: str | None = None,
 ) -> None:
@@ -48,6 +49,7 @@ def create_run_record(
             run = session.get(Run, run_id)
             if run:
                 run.status = status
+                run.run_type = run_type
                 run.input_payload = input_data
                 run.output_dir = str(output_dir)
                 run.slack_channel = slack_channel
@@ -56,6 +58,7 @@ def create_run_record(
                 run = Run(
                     id=run_id,
                     status=status,
+                    run_type=run_type,
                     input_payload=input_data,
                     output_dir=str(output_dir),
                     slack_channel=slack_channel,
@@ -82,26 +85,55 @@ def update_run_record(run_id: str, status: str, error: str | None, completed_at:
         logger.warning("Failed to update run %s: %s", run_id, exc)
 
 
-def save_bot_response(
+def save_standby_response(
     run_id: str,
-    bot_name: str,
     status: str,
-    output_path: Path | None,
-    payload: Any | None,
+    output_paths: dict[str, Any],
+    myidtravel_payload: Any | None,
+    google_flights_payload: Any | None,
+    stafftraveler_payload: Any | None,
+    gemini_payload: Any | None,
     error: str | None = None,
 ) -> None:
     try:
         with Session(engine) as session:
-            response = BotResponse(
+            response = StandbyBotResponse(
                 run_id=run_id,
-                bot_name=bot_name,
                 status=status,
-                output_path=str(output_path) if output_path else None,
-                payload=payload,
+                myidtravel_payload=myidtravel_payload,
+                google_flights_payload=google_flights_payload,
+                stafftraveler_payload=stafftraveler_payload,
+                gemini_payload=gemini_payload,
+                output_paths=output_paths,
                 error=error,
                 created_at=datetime.utcnow(),
             )
             session.add(response)
             session.commit()
     except Exception as exc:
-        logger.warning("Failed to persist bot response for %s/%s: %s", run_id, bot_name, exc)
+        logger.warning("Failed to persist standby response for %s: %s", run_id, exc)
+
+
+def save_lookup_response(
+    run_id: str,
+    status: str,
+    output_paths: dict[str, Any],
+    google_flights_payload: Any | None,
+    stafftraveler_payload: Any | None,
+    error: str | None = None,
+) -> None:
+    try:
+        with Session(engine) as session:
+            response = LookupBotResponse(
+                run_id=run_id,
+                status=status,
+                google_flights_payload=google_flights_payload,
+                stafftraveler_payload=stafftraveler_payload,
+                output_paths=output_paths,
+                error=error,
+                created_at=datetime.utcnow(),
+            )
+            session.add(response)
+            session.commit()
+    except Exception as exc:
+        logger.warning("Failed to persist lookup response for %s: %s", run_id, exc)

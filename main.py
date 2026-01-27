@@ -6,7 +6,6 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +29,7 @@ load_dotenv(BASE_DIR / ".env", override=True, interpolate=False)
 
 import config
 from bots import google_flights_bot, google_flights_bot_2, myidtravel_bot, stafftraveler_bot, stafftraveler_bot_2
-from db import create_run_record, ensure_data_dir, save_bot_response, update_run_record
+from db import create_run_record, ensure_data_dir, save_lookup_response, save_standby_response, update_run_record
 
 logger = logging.getLogger("globalpass")
 if not logging.getLogger().handlers:
@@ -102,15 +101,6 @@ slack_socket_client: SocketModeClient | None = None
 slack_connected: bool = False
 
 
-def _load_json_payload(path: Path) -> Any | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
-
-
 async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
     """Process incoming Slack Socket Mode events"""
 
@@ -178,6 +168,7 @@ async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
                         input_data=input_data,
                         output_dir=run_dir,
                         status=state.status,
+                        run_type="standard",
                         slack_channel=channel,
                         slack_thread_ts=ts,
                     )
@@ -590,16 +581,6 @@ class RunState:
             logger.error(f"Error type: {type(e).__name__}")
 
 
-@contextmanager
-def patch_config(attr: str, value: Any):
-    previous = getattr(config, attr, None)
-    setattr(config, attr, value)
-    try:
-        yield
-    finally:
-        setattr(config, attr, previous)
-
-
 def make_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
@@ -905,8 +886,7 @@ def to_minutes(duration_str: str) -> int:
         return 1440
 
 
-async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> dict[str, Any]:
-    output_path = state.output_dir / "myidtravel_flightschedule.json"
+async def run_myidtravel(state: RunState, headed: bool) -> dict[str, Any]:
     await state.log("[myidtravel] starting")
     notify: Callable[[str], Awaitable[None]] | None = None
     if state.slack_channel and slack_web_client:
@@ -925,53 +905,32 @@ async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> dic
         notify = _notify
 
     try:
-        with patch_config("FLIGHTSCHEDULE_OUTPUT", output_path):
-            myidtravel_bot.set_notifier(notify)
-            try:
-                await myidtravel_bot.run(
-                    headless=not headed,
-                    screenshot=None,
-                    input_path=str(input_path),
-                    final_screenshot=str(state.output_dir / "myidtravel_final.png"),
-                )
-            finally:
-                myidtravel_bot.set_notifier(None)
-        if output_path.exists():
-            state.result_files["myidtravel"] = output_path
-            await state.log(f"[myidtravel] wrote results to {output_path}")
-            save_bot_response(
-                run_id=state.id,
-                bot_name="myidtravel",
-                status="ok",
-                output_path=output_path,
-                payload=_load_json_payload(output_path),
+        myidtravel_bot.set_notifier(notify)
+        try:
+            payload = await myidtravel_bot.run(
+                headless=not headed,
+                screenshot=None,
+                input_path=None,
+                final_screenshot=str(state.output_dir / "myidtravel_final.png"),
+                input_data=state.input_data,
+                output_path=None,
             )
-        else:
-            await state.log("[myidtravel] finished but output file was not found")
-            save_bot_response(
-                run_id=state.id,
-                bot_name="myidtravel",
-                status="error",
-                output_path=output_path,
-                payload=None,
-                error="output file not found",
-            )
-        return {"name": "myidtravel", "status": "ok", "output": str(output_path)}
+        finally:
+            myidtravel_bot.set_notifier(None)
+        if payload is None:
+            await state.log("[myidtravel] finished but no data was captured")
+        return {
+            "name": "myidtravel",
+            "status": "ok" if payload is not None else "error",
+            "payload": payload,
+            "error": None if payload is not None else "no data captured",
+        }
     except Exception as exc:
         await state.log(f"[myidtravel] error: {exc}")
-        save_bot_response(
-            run_id=state.id,
-            bot_name="myidtravel",
-            status="error",
-            output_path=output_path,
-            payload=None,
-            error=str(exc),
-        )
-        return {"name": "myidtravel", "status": "error", "error": str(exc)}
+        return {"name": "myidtravel", "status": "error", "error": str(exc), "payload": None}
 
 
-async def run_google_flights(state: RunState, input_path: Path, limit: int, headed: bool) -> dict[str, Any]:
-    output_path = state.output_dir / "google_flights_results.json"
+async def run_google_flights(state: RunState, limit: int, headed: bool) -> dict[str, Any]:
     await state.log("[google_flights] starting")
     notify: Callable[[str], Awaitable[None]] | None = None
     if state.slack_channel and slack_web_client:
@@ -991,42 +950,30 @@ async def run_google_flights(state: RunState, input_path: Path, limit: int, head
     try:
         google_flights_bot.set_notifier(notify)
         try:
-            await google_flights_bot.run(
+            payload = await google_flights_bot.run(
                 headless=not headed,
-                input_path=str(input_path),
-                output=output_path,
+                input_path=None,
+                output=None,
                 limit=limit,
                 screenshot=str(state.output_dir / "google_flights_final.png"),
+                input_data=state.input_data,
             )
         finally:
             google_flights_bot.set_notifier(None)
-        state.result_files["google_flights"] = output_path
-        await state.log(f"[google_flights] wrote results to {output_path}")
-        save_bot_response(
-            run_id=state.id,
-            bot_name="google_flights",
-            status="ok",
-            output_path=output_path,
-            payload=_load_json_payload(output_path),
-        )
-        return {"name": "google_flights", "status": "ok", "output": str(output_path)}
+        if payload is None:
+            await state.log("[google_flights] finished but no data was captured")
+        return {
+            "name": "google_flights",
+            "status": "ok" if payload is not None else "error",
+            "payload": payload,
+            "error": None if payload is not None else "no data captured",
+        }
     except Exception as exc:
         await state.log(f"[google_flights] error: {exc}")
-        save_bot_response(
-            run_id=state.id,
-            bot_name="google_flights",
-            status="error",
-            output_path=output_path,
-            payload=None,
-            error=str(exc),
-        )
-        return {"name": "google_flights", "status": "error", "error": str(exc)}
+        return {"name": "google_flights", "status": "error", "error": str(exc), "payload": None}
 
 
-async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> dict[str, Any]:
-    output_path = state.output_dir / "stafftraveller_results.json"
-    storage_path = state.output_dir / "stafftraveler_auth_state.json"
-
+async def run_stafftraveler(state: RunState, headed: bool) -> dict[str, Any]:
     await state.log("[stafftraveler] starting")
     notify: Callable[[str], Awaitable[None]] | None = None
 
@@ -1045,39 +992,28 @@ async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> 
 
         notify = _notify
     try:
-        with patch_config("STAFF_RESULTS_OUTPUT", output_path):
-            stafftraveler_bot.set_notifier(notify)
-            try:
-                await stafftraveler_bot.perform_stafftraveller_login(
-                    headless=not headed,
-                    screenshot=str(state.output_dir / "stafftraveler_final.png"),
-                    storage_path=str(storage_path),
-                    input_data=myidtravel_bot.read_input(str(input_path)),
-                )
-            finally:
-                stafftraveler_bot.set_notifier(None)
+        stafftraveler_bot.set_notifier(notify)
+        try:
+            payload = await stafftraveler_bot.perform_stafftraveller_login(
+                headless=not headed,
+                screenshot=str(state.output_dir / "stafftraveler_final.png"),
+                input_data=state.input_data,
+                output_path=None,
+            )
+        finally:
+            stafftraveler_bot.set_notifier(None)
 
-        state.result_files["stafftraveler"] = output_path
-        await state.log(f"[stafftraveler] wrote results to {output_path}")
-        save_bot_response(
-            run_id=state.id,
-            bot_name="stafftraveler",
-            status="ok",
-            output_path=output_path,
-            payload=_load_json_payload(output_path),
-        )
-        return {"name": "stafftraveler", "status": "ok", "output": str(output_path)}
+        if payload is None:
+            await state.log("[stafftraveler] finished but no data was captured")
+        return {
+            "name": "stafftraveler",
+            "status": "ok" if payload is not None else "error",
+            "payload": payload,
+            "error": None if payload is not None else "no data captured",
+        }
     except Exception as exc:
         await state.log(f"[stafftraveler] error: {exc}")
-        save_bot_response(
-            run_id=state.id,
-            bot_name="stafftraveler",
-            status="error",
-            output_path=output_path,
-            payload=None,
-            error=str(exc),
-        )
-        return {"name": "stafftraveler", "status": "error", "error": str(exc)}
+        return {"name": "stafftraveler", "status": "error", "error": str(exc), "payload": None}
 
 
 async def execute_run(state: RunState, limit: int, headed: bool) -> None:
@@ -1106,20 +1042,42 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         await state.log("Run started; launching three bots concurrently.")
         logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
 
-        input_path = state.output_dir / "input.json"
-        input_path.write_text(json.dumps(state.input_data, indent=2))
-
         tasks = [
-            run_myidtravel(state, input_path, headed),
-            run_google_flights(state, input_path, limit, headed),
-            run_stafftraveler(state, input_path, headed),
+            run_myidtravel(state, headed),
+            run_google_flights(state, limit, headed),
+            run_stafftraveler(state, headed),
         ]
         results = await asyncio.gather(*tasks)
 
         had_error = any(res.get("status") == "error" for res in results)
 
         # Generate flight loads report
-        await _run_generate_flight_loads(state)
+        report_payload = await _run_generate_flight_loads(
+            state,
+            myid_payload=next((res.get("payload") for res in results if res.get("name") == "myidtravel"), None),
+            staff_payload=next((res.get("payload") for res in results if res.get("name") == "stafftraveler"), None),
+            google_payload=next((res.get("payload") for res in results if res.get("name") == "google_flights"), None),
+        )
+
+        myid_payload = next((res.get("payload") for res in results if res.get("name") == "myidtravel"), None)
+        google_payload = next((res.get("payload") for res in results if res.get("name") == "google_flights"), None)
+        staff_payload = next((res.get("payload") for res in results if res.get("name") == "stafftraveler"), None)
+        gemini_payload = report_payload.get("gemini_payload") if report_payload else None
+        save_standby_response(
+            run_id=state.id,
+            status="error" if had_error else "completed",
+            output_paths={
+                "excel": str(state.output_dir / "standby_report_multi.xlsx"),
+                "myidtravel_screenshot": str(state.output_dir / "myidtravel_final.png"),
+                "google_flights_screenshot": str(state.output_dir / "google_flights_final.png"),
+                "stafftraveler_screenshot": str(state.output_dir / "stafftraveler_final.png"),
+            },
+            myidtravel_payload=myid_payload,
+            google_flights_payload=google_payload,
+            stafftraveler_payload=staff_payload,
+            gemini_payload=gemini_payload,
+            error=", ".join(res.get("error", "") for res in results if res.get("error")) or None,
+        )
 
         state.status = "error" if had_error else "completed"
         state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
@@ -1131,17 +1089,11 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         # Get top 5 flights for Slack notification
         top_flights = []
         try:
-            json_output = state.output_dir / "standby_report_multi.json"
-            if json_output.exists():
-                with open(json_output) as f:
-                    report_data = json.load(f)
-
-                # Get the appropriate top 5 list based on travel status
-                travel_status = (state.input_data.get("travel_status") or "").strip().lower()
-                if travel_status == "bookable":
-                    top_flights = report_data.get("Top_5_Bookable", [])
-                else:
-                    top_flights = report_data.get("Top_5_R2_Standby", [])
+            travel_status = (state.input_data.get("travel_status") or "").strip().lower()
+            if travel_status == "bookable":
+                top_flights = report_payload.get("top_5_bookable", []) if report_payload else []
+            else:
+                top_flights = report_payload.get("top_5_standby", []) if report_payload else []
         except Exception as e:
             logger.error(f"Failed to load top flights for Slack: {e}")
 
@@ -1401,7 +1353,12 @@ async def scrape_airlines_task(
     }
 
 
-async def _run_generate_flight_loads(state: RunState) -> None:
+async def _run_generate_flight_loads(
+    state: RunState,
+    myid_payload: list[dict[str, Any]] | dict[str, Any] | None,
+    staff_payload: list[dict[str, Any]] | None,
+    google_payload: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
     """
     Generate standby_report_multi.* using available data with fallback handling.
     Works even if one or more JSON sources are missing.
@@ -1409,47 +1366,29 @@ async def _run_generate_flight_loads(state: RunState) -> None:
     """
     await state.log("[report] Starting flight loads report generation...")
 
+    gemini_payload: dict[str, Any] | None = None
     try:
         # Load sources with fallback to empty data
-        myid_data = {}
-        google_data = []
-        staff_data = []
+        if isinstance(myid_payload, list):
+            myid_data = {"routings": myid_payload}
+        else:
+            myid_data = myid_payload or {}
+        google_data = google_payload or []
+        staff_data = staff_payload or []
         gemini_top_flights: list[dict[str, Any]] | None = None
 
-        myid_path = state.result_files.get("myidtravel")
-        google_path = state.result_files.get("google_flights")
-        staff_path = state.result_files.get("stafftraveler")
-
-        # Load MyIDTravel (most critical source)
-        if myid_path and myid_path.exists():
-            try:
-                with open(myid_path) as f:
-                    myid_data = json.load(f)
-                await state.log("[report] Loaded MyIDTravel data")
-            except Exception as e:
-                await state.log(f"[report] Failed to load MyIDTravel: {e}")
+        if myid_data:
+            await state.log("[report] Loaded MyIDTravel data")
         else:
             await state.log("[report] MyIDTravel data not available")
 
-        # Load Google Flights
-        if google_path and google_path.exists():
-            try:
-                with open(google_path) as f:
-                    google_data = json.load(f)
-                await state.log("[report] Loaded Google Flights data")
-            except Exception as e:
-                await state.log(f"[report] Failed to load Google Flights: {e}")
+        if google_data:
+            await state.log("[report] Loaded Google Flights data")
         else:
             await state.log("[report] Google Flights data not available")
 
-        # Load StaffTraveler
-        if staff_path and staff_path.exists():
-            try:
-                with open(staff_path) as f:
-                    staff_data = json.load(f)
-                await state.log("[report] Loaded StaffTraveler data")
-            except Exception as e:
-                await state.log(f"[report] Failed to load StaffTraveler: {e}")
+        if staff_data:
+            await state.log("[report] Loaded StaffTraveler data")
         else:
             await state.log("[report] StaffTraveler data not available")
 
@@ -1463,14 +1402,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                     google_data,
                 )
                 if gemini_raw:
-                    gemini_text_path = state.output_dir / "gemini_response.txt"
-                    gemini_text_path.write_text(gemini_raw)
-                    state.result_files["gemini_response.txt"] = gemini_text_path
-                    gemini_json = _extract_json_from_text(gemini_raw)
-                    if gemini_json is not None:
-                        gemini_json_path = state.output_dir / "gemini_response.json"
-                        gemini_json_path.write_text(json.dumps(gemini_json, indent=2))
-                        state.result_files["gemini_response.json"] = gemini_json_path
+                    gemini_payload = _extract_json_from_text(gemini_raw)
                 if not gemini_top_flights:
                     await state.log("[report] Gemini returned no usable top flights; falling back to default")
             except Exception as exc:
@@ -1480,7 +1412,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         # If no data at all, cannot proceed
         if not myid_data and not staff_data and not google_data:
             await state.log("[report] No data available from any source")
-            return
+            return {"gemini_payload": gemini_payload}
 
         # Build flight registry
         registry = {}
@@ -1830,7 +1762,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         input_summary.append({"Parameter": "Stafftraveler Flights", "Value": len(staff_all_flights)})
         input_summary.append({"Parameter": "Google Flights Results", "Value": len(google_all_flights)})
 
-        # Build results
+        # Build results for Excel
         results = {
             "Input_Summary": input_summary,
             "MyIDTravel_All": myid_all_flights,
@@ -1841,14 +1773,6 @@ async def _run_generate_flight_loads(state: RunState) -> None:
             results["Top_5_Bookable"] = top_5_bookable
         else:
             results["Top_5_R2_Standby"] = top_5_standby
-
-        # Save JSON
-        json_output = state.output_dir / "standby_report_multi.json"
-        with open(json_output, "w") as f:
-            json.dump(results, f, indent=4)
-
-        state.result_files["standby_report_multi.json"] = json_output
-        await state.log(f"[report] Generated {json_output}")
 
         # Generate Excel
         try:
@@ -1888,12 +1812,18 @@ async def _run_generate_flight_loads(state: RunState) -> None:
         await state.log(f"  - Top 5 Bookable: {len(top_5_bookable)}")
         if low_load_alerts:
             await state.log(f"  -️  {len(low_load_alerts)} low availability alerts")
+        return {
+            "gemini_payload": gemini_payload,
+            "top_5_standby": top_5_standby,
+            "top_5_bookable": top_5_bookable,
+        }
 
     except Exception as exc:
         await state.log(f"[report] Error: {exc}")
         import traceback
 
         await state.log(f"[report] {traceback.format_exc()}")
+        return {"gemini_payload": gemini_payload}
 
 
 @app.on_event("startup")
@@ -1970,7 +1900,13 @@ async def start_run(payload: dict[str, Any] = BODY_REQUIRED):
 
     state = RunState(run_id, run_dir, input_data)
     RUNS[run_id] = state
-    create_run_record(run_id=run_id, input_data=input_data, output_dir=run_dir, status=state.status)
+    create_run_record(
+        run_id=run_id,
+        input_data=input_data,
+        output_dir=run_dir,
+        status=state.status,
+        run_type="standard",
+    )
 
     logger.info("Queued run %s", run_id)
     asyncio.create_task(execute_run(state, limit=limit, headed=headed))
@@ -1989,32 +1925,32 @@ async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
     run_id = make_run_id()
     run_dir = OUTPUT_ROOT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    create_run_record(run_id=run_id, input_data=input_data, output_dir=run_dir, status="running")
+    create_run_record(
+        run_id=run_id,
+        input_data=input_data,
+        output_dir=run_dir,
+        status="running",
+        run_type="lookup",
+    )
 
-    input_path = run_dir / "input.json"
-    input_path.write_text(json.dumps(input_data, indent=2))
-
-    google_output = run_dir / "google_flights_results.json"
-    staff_output = run_dir / "stafftraveller_all_flights.json"
-    storage_path = run_dir / "stafftraveler_auth_state.json"
     headed = bool(payload.get("headed")) if isinstance(payload, dict) else False
 
     async def _run_google():
-        await google_flights_bot_2.run(
+        return await google_flights_bot_2.run(
             headless=not headed,
-            input_path=str(input_path),
-            output=google_output,
+            input_path=None,
+            output=None,
             limit=30,
             screenshot=str(run_dir / "google_flights_final.png"),
+            input_data=input_data,
         )
 
     async def _run_staff():
-        await stafftraveler_bot_2.perform_stafftraveller_login(
+        return await stafftraveler_bot_2.perform_stafftraveller_login(
             headless=not headed,
             screenshot=str(run_dir / "stafftraveler_final.png"),
-            storage_path=str(storage_path),
-            output_path=staff_output,
             input_data=input_data,
+            output_path=None,
         )
 
     results = await asyncio.gather(_run_google(), _run_staff(), return_exceptions=True)
@@ -2023,34 +1959,19 @@ async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
     google_error = str(results[0]) if isinstance(results[0], Exception) else None
     staff_error = str(results[1]) if isinstance(results[1], Exception) else None
 
-    google_payload = []
-    staff_payload = []
-    try:
-        if google_output.exists():
-            google_payload = json.loads(google_output.read_text())
-    except Exception:
-        google_payload = []
-    try:
-        if staff_output.exists():
-            staff_payload = json.loads(staff_output.read_text())
-    except Exception:
-        staff_payload = []
+    google_payload = results[0] if not isinstance(results[0], Exception) else []
+    staff_payload = results[1] if not isinstance(results[1], Exception) else []
 
-    save_bot_response(
+    save_lookup_response(
         run_id=run_id,
-        bot_name="google_flights",
-        status="error" if google_error else "ok",
-        output_path=google_output,
-        payload=google_payload if google_payload else None,
-        error=google_error,
-    )
-    save_bot_response(
-        run_id=run_id,
-        bot_name="stafftraveler",
-        status="error" if staff_error else "ok",
-        output_path=staff_output,
-        payload=staff_payload if staff_payload else None,
-        error=staff_error,
+        status="error" if errors else "completed",
+        output_paths={
+            "google_flights_screenshot": str(run_dir / "google_flights_final.png"),
+            "stafftraveler_screenshot": str(run_dir / "stafftraveler_final.png"),
+        },
+        google_flights_payload=google_payload if google_payload else None,
+        stafftraveler_payload=staff_payload if staff_payload else None,
+        error=", ".join(errors) if errors else None,
     )
     update_run_record(
         run_id=run_id,
@@ -2074,13 +1995,6 @@ async def run_details(run_id: str):
     state = RUNS.get(run_id)
     if not state:
         raise HTTPException(status_code=404, detail="Run not found.")
-    report_path = state.output_dir / REPORT_JSON
-    report_data = {}
-    if report_path.exists():
-        try:
-            report_data = json.loads(report_path.read_text())
-        except Exception:
-            report_data = {}
     return {
         "run_id": run_id,
         "status": state.status,
@@ -2088,7 +2002,7 @@ async def run_details(run_id: str):
         "created_at": state.created_at.isoformat(),
         "completed_at": state.completed_at.isoformat() if state.completed_at else None,
         "output_dir": str(state.output_dir),
-        "report": report_data,
+        "report": {},
         "files": {k: str(v) for k, v in state.result_files.items() if v.exists()},
     }
 

@@ -19,6 +19,7 @@ def upgrade() -> None:
     op.create_table(
         "runs",
         sa.Column("id", sa.String(), nullable=False),
+        sa.Column("run_type", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("error", sa.String(), nullable=True),
         sa.Column("input_payload", sa.JSON(), nullable=False),
@@ -32,19 +33,36 @@ def upgrade() -> None:
     op.create_index("ix_runs_id", "runs", ["id"], unique=True)
 
     op.create_table(
-        "bot_responses",
+        "standby_bot_responses",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("run_id", sa.String(), nullable=False),
-        sa.Column("bot_name", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
-        sa.Column("output_path", sa.String(), nullable=True),
-        sa.Column("payload", sa.JSON(), nullable=True),
+        sa.Column("myidtravel_payload", sa.JSON(), nullable=True),
+        sa.Column("google_flights_payload", sa.JSON(), nullable=True),
+        sa.Column("stafftraveler_payload", sa.JSON(), nullable=True),
+        sa.Column("gemini_payload", sa.JSON(), nullable=True),
+        sa.Column("output_paths", sa.JSON(), nullable=True),
         sa.Column("error", sa.String(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_bot_responses_run_id", "bot_responses", ["run_id"], unique=False)
+    op.create_index("ix_standby_bot_responses_run_id", "standby_bot_responses", ["run_id"], unique=False)
+
+    op.create_table(
+        "lookup_bot_responses",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("run_id", sa.String(), nullable=False),
+        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("google_flights_payload", sa.JSON(), nullable=True),
+        sa.Column("stafftraveler_payload", sa.JSON(), nullable=True),
+        sa.Column("output_paths", sa.JSON(), nullable=True),
+        sa.Column("error", sa.String(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(["run_id"], ["runs.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_lookup_bot_responses_run_id", "lookup_bot_responses", ["run_id"], unique=False)
 
     op.create_table(
         "myidtravel_accounts",
@@ -79,7 +97,9 @@ def downgrade() -> None:
     op.drop_table("stafftraveler_accounts")
     op.drop_index("ix_myidtravel_accounts_username", table_name="myidtravel_accounts")
     op.drop_table("myidtravel_accounts")
-    op.drop_index("ix_bot_responses_run_id", table_name="bot_responses")
-    op.drop_table("bot_responses")
+    op.drop_index("ix_lookup_bot_responses_run_id", table_name="lookup_bot_responses")
+    op.drop_table("lookup_bot_responses")
+    op.drop_index("ix_standby_bot_responses_run_id", table_name="standby_bot_responses")
+    op.drop_table("standby_bot_responses")
     op.drop_index("ix_runs_id", table_name="runs")
     op.drop_table("runs")

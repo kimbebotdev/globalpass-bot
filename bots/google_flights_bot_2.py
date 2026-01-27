@@ -1227,17 +1227,24 @@ async def _select_seat_class(page, seat_class: str) -> None:
     await page.wait_for_timeout(300)
 
 
-async def run(headless: bool, input_path: str, output: Path, limit: int, screenshot: str | None) -> None:
+async def run(
+    headless: bool,
+    input_path: str | None,
+    output: Path | None,
+    limit: int,
+    screenshot: str | None,
+    input_data: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     logger.info(
         "Starting Google Flights run headless=%s input=%s limit=%s",
         headless,
         input_path,
         limit,
     )
-    input_data = read_input(input_path)
-    legs, flight_type = build_legs(input_data)
+    resolved_input = input_data or read_input(input_path or "input.json")
+    legs, flight_type = build_legs(resolved_input)
     logger.info("Prepared %s leg(s) for flight_type=%s", len(legs), flight_type)
-    nonstop_only = bool(input_data.get("nonstop_flights"))
+    nonstop_only = bool(resolved_input.get("nonstop_flights"))
 
     results: list[dict[str, Any]] = []
 
@@ -1254,8 +1261,8 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
         await _switch_trip_type(page, flight_type)
         await _max_adults(page)
         seat_class = ""
-        if input_data.get("itinerary"):
-            seat_class = input_data["itinerary"][0].get("class", "")
+        if resolved_input.get("itinerary"):
+            seat_class = resolved_input["itinerary"][0].get("class", "")
         await _select_seat_class(page, seat_class)
         logger.info(
             "Configured trip type=%s passengers seat_class=%s",
@@ -1314,7 +1321,7 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
             except PlaywrightTimeout:
                 pass
 
-        flight_number = (input_data.get("flight_number") or "").replace(" ", "").upper()
+        flight_number = (resolved_input.get("flight_number") or "").replace(" ", "").upper()
         flights = await _scrape_results(page, limit=limit, flight_number=flight_number or None)
         logger.info(
             "Scraped flights: top=%s",
@@ -1341,19 +1348,22 @@ async def run(headless: bool, input_path: str, output: Path, limit: int, screens
 
         await browser.close()
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(results, indent=2))
-    logger.info("Wrote %s leg result(s) to %s", len(results), output)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(results, indent=2))
+        logger.info("Wrote %s leg result(s) to %s", len(results), output)
+
+    return results
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape Google Flights using input.json values.")
     parser.add_argument("--headed", action="store_true", help="Run browser in headed mode.")
-    parser.add_argument("--input", default="input.json", help="Path to the input JSON file.")
+    parser.add_argument("--input", default="", help="Path to the input JSON file.")
     parser.add_argument(
         "--output",
-        default=str(OUTPUT_PATH),
-        help="Path to write scraped Google Flights results (JSON).",
+        default="",
+        help="Optional path to write scraped Google Flights results (JSON).",
     )
     parser.add_argument(
         "--limit",
@@ -1368,10 +1378,12 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = parse_args()
     screenshot = args.screenshot or None
+    input_path = args.input or None
+    output_path = Path(args.output) if args.output else None
     await run(
         headless=not args.headed,
-        input_path=args.input,
-        output=Path(args.output),
+        input_path=input_path,
+        output=output_path,
         limit=args.limit,
         screenshot=screenshot,
     )

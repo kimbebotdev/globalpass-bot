@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,10 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import delete
 from sqlmodel import Session, create_engine
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
 
 from models import MyidtravelAccount, StafftravelerAccount
 
