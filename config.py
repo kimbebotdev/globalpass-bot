@@ -1,6 +1,7 @@
 """
 Centralized configuration for selectors, URLs, and output paths.
 """
+
 import os
 from pathlib import Path
 
@@ -20,6 +21,8 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "dev").strip().lower()
 BASE_URL_DEV = os.getenv("BASE_URL_DEV", "http://localhost:8000").rstrip("/")
 BASE_URL_PROD = os.getenv("BASE_URL_PROD", BASE_URL_DEV).rstrip("/")
 BASE_URL = BASE_URL_PROD if ENVIRONMENT == "prod" else BASE_URL_DEV
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", 8000))
 
 # Flight loads output format: default | gemini
 FINAL_OUTPUT_FORMAT = os.getenv("FINAL_OUTPUT_FORMAT", "default").strip().lower()

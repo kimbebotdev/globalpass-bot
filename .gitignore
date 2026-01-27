@@ -4,10 +4,16 @@
 .DS_store
 __pycache__
 
-# Ignore auto generated files from root
+# Ignore auto generated files
 *.json
 *.png
+*.xlsx
+*.csv
 
 outputs
-env
+.venv
 json
+data
+
+AGENTS.md
+.ruff_cache

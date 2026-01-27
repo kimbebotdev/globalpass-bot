@@ -44,7 +44,6 @@ check_file ".env" "critical"
 check_file ".env.example" "optional"
 check_file "input-template.json"
 check_file ".gitignore" "optional"
-check_file "setup.sh" "optional"
 check_file "start.sh" "critical"
 echo ""
 
@@ -83,10 +82,10 @@ fi
 echo ""
 
 # Check environment directory
-if [ -d "env" ]; then
-    echo -e "${GREEN}✅ env/ directory exists${NC}"
+if [ -d ".venv" ]; then
+    echo -e "${GREEN}✅ .venv/ directory exists${NC}"
 else
-    echo -e "${YELLOW}⚠️  env/ directory missing (run: python3 -m venv env)${NC}"
+    echo -e "${YELLOW}⚠️  .venv/ directory missing (run: python3 -m venv .venv)${NC}"
     ((WARNINGS++))
 fi
 echo ""
