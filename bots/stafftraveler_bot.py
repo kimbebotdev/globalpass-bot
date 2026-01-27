@@ -8,6 +8,7 @@ import sys
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PlaywrightTimeout
@@ -325,7 +326,9 @@ async def close_date_selection_ui(page):
 # End of close_date_selection_ui
 
 
-async def perform_flight_search(page, input_data: dict) -> None:
+async def perform_flight_search(
+    page, input_data: dict, output_path: Path | None = None
+) -> list[dict[str, Any]]:
     trips = input_data.get("trips") or []
     itinerary = input_data.get("itinerary") or []
     if not trips:
@@ -365,16 +368,17 @@ async def perform_flight_search(page, input_data: dict) -> None:
     await page.wait_for_timeout(1500)
 
     results = await _scrape_results(page)
-    if config.STAFF_RESULTS_OUTPUT:
-        config.STAFF_RESULTS_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-        config.STAFF_RESULTS_OUTPUT.write_text(json.dumps(results, indent=2))
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(results, indent=2))
+    return results
 
 
 async def perform_stafftraveller_login(
     headless: bool,
     screenshot: str | None,
-    storage_path: str,
     input_data: dict | None = None,
+    output_path: Path | None = None,
 ) -> None:
     logger.info("Starting StaffTraveler login headless=%s", headless)
     username = os.getenv("ST_USERNAME")
@@ -485,7 +489,7 @@ async def perform_stafftraveller_login(
 
         if input_data:
             logger.info("Performing StaffTraveler flight search")
-            await perform_flight_search(page, input_data)
+            return await perform_flight_search(page, input_data, output_path=output_path)
 
         if screenshot:
             try:
@@ -495,9 +499,8 @@ async def perform_stafftraveller_login(
             except Exception:
                 pass
 
-        await context.storage_state(path=storage_path)
-        logger.info("StaffTraveler login/search complete; storage saved to %s", storage_path)
         await browser.close()
+    return []
 
 
 def parse_args() -> argparse.Namespace:
@@ -513,13 +516,8 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to save a post-login screenshot.",
     )
     parser.add_argument(
-        "--storage-state",
-        default="stafftraveller_auth_state.json",
-        help="Path to write the authenticated storage state.",
-    )
-    parser.add_argument(
         "--input",
-        default="input.json",
+        default="",
         help="Path to input JSON for the flight search.",
     )
     parser.add_argument(
@@ -533,11 +531,10 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = parse_args()
     screenshot = args.screenshot or None
-    input_data = None if args.login_only else read_input(args.input)
+    input_data = None if args.login_only else read_input(args.input or "input.json")
     await perform_stafftraveller_login(
         headless=not args.headed,
         screenshot=screenshot,
-        storage_path=args.storage_state,
         input_data=input_data,
     )
 

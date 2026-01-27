@@ -676,7 +676,7 @@ async def click_traveller_continue(page) -> None:
             pass
 
 
-async def submit_form_and_capture(page, output_path: Path) -> None:
+async def submit_form_and_capture(page, output_path: Path | None = None) -> Any | None:
     loop = asyncio.get_event_loop()
     flightschedule_future: asyncio.Future = loop.create_future()
 
@@ -699,9 +699,10 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
             data = await response.json()
         except Exception:
             data = await response.text()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
-        logger.info("Saved flightschedule response to %s", output_path)
+        if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
+            logger.info("Saved flightschedule response to %s", output_path)
         if isinstance(data, dict):
             routings = data.get("routings", [])
             has_flights = any(
@@ -710,15 +711,19 @@ async def submit_form_and_capture(page, output_path: Path) -> None:
             )
             if not has_flights:
                 await _notify_message("MyIDTravel: no results available for the search.")
+            return routings
+        if isinstance(data, list):
+            return data
     except asyncio.TimeoutError:
         logger.warning("Timed out waiting for flightschedule response; no JSON saved.")
         await _notify_message("MyIDTravel: Timed out waiting for flight schedule response; no JSON saved.")
     except Exception as exc:
         logger.error("Error capturing flightschedule response: %s", exc, exc_info=True)
         await _notify_message("MyIDTravel: Error capturing flight schedule response.")
+    return None
 
 
-async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
+async def fill_form_from_input(page, input_data: Dict[str, Any], output_path: Path | None = None) -> Any | None:
     logger.info("Successful login; filling form")
 
     try:
@@ -812,8 +817,7 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
     await page.wait_for_timeout(500)
 
     # Save under a consistent flightschedule filename (independent of flight_type input).
-    output_path = config.FLIGHTSCHEDULE_OUTPUT
-    await submit_form_and_capture(page, output_path)
+    return await submit_form_and_capture(page, output_path)
 
     await page.wait_for_timeout(1000)
 
@@ -821,19 +825,19 @@ async def fill_form_from_input(page, input_data: Dict[str, Any]) -> None:
 async def run(
     headless: bool,
     screenshot: str | None,
-    input_path: str,
+    input_path: str | None,
     final_screenshot: str | None = None,
-) -> None:
-    input_data = read_input(input_path)
+    input_data: dict[str, Any] | None = None,
+    output_path: Path | None = None,
+) -> Any | None:
+    resolved_input = input_data or read_input(input_path or "input.json")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
 
         page = await perform_login(context, headless=headless, screenshot=screenshot)
-        await context.storage_state(path="auth_state.json")
-
-        await fill_form_from_input(page, input_data)
+        data = await fill_form_from_input(page, resolved_input, output_path=output_path)
 
         if final_screenshot:
             try:
@@ -844,20 +848,30 @@ async def run(
                 pass
 
         await browser.close()
+        return data
+    return None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Login and fill flight form using input.json values.")
     parser.add_argument("--headed", action="store_true", help="Run browser in headed mode.")
     parser.add_argument("--screenshot", default="", help="Optional path to save login screenshot.")
-    parser.add_argument("--input", default="input.json", help="Path to input JSON file.")
+    parser.add_argument("--input", default="", help="Path to input JSON file.")
+    parser.add_argument("--output", default="", help="Optional path to save flight schedule JSON.")
     return parser.parse_args()
 
 
 async def main() -> None:
     args = parse_args()
     screenshot = args.screenshot or None
-    await run(headless=not args.headed, screenshot=screenshot, input_path=args.input)
+    input_path = args.input or None
+    output_path = Path(args.output) if args.output else None
+    await run(
+        headless=not args.headed,
+        screenshot=screenshot,
+        input_path=input_path,
+        output_path=output_path,
+    )
 
 
 if __name__ == "__main__":
