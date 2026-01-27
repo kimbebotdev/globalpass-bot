@@ -27,14 +27,14 @@ echo -e "${GREEN}Port:${NC} $API_PORT"
 echo ""
 
 # Check if virtual environment exists
-if [ ! -d "env" ]; then
+if [ ! -d ".venv" ]; then
     echo -e "${YELLOW}Virtual environment not found. Creating one...${NC}"
-    python3 -m venv env
+    python3 -m venv .venv
     echo -e "${GREEN}Virtual environment created${NC}\n"
 fi
 
 # Activate virtual environment
-source env/bin/activate
+source .venv/bin/activate
 
 # Install/update dependencies
 echo -e "${BLUE}Checking dependencies...${NC}"

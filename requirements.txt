@@ -6,3 +6,9 @@ fastapi
 uvicorn[standard]
 slack-sdk
 aiohttp
+sqlmodel
+sqlalchemy
+alembic
+bcrypt
+itsdangerous
+python-multipart

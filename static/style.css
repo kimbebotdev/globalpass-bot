@@ -176,6 +176,43 @@ h3 {
   padding: 0;
 }
 
+.logout-form {
+  margin: 0;
+}
+
+.logout-button {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: var(--shadow-sm);
+  padding: 0;
+}
+
+.logout-button:hover {
+  background: var(--danger-glow);
+  border-color: var(--danger);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.logout-button svg {
+  color: var(--text-primary);
+  transition: all 0.3s ease;
+  width: 20px;
+  height: 20px;
+}
+
+.logout-button:hover svg {
+  color: var(--danger);
+}
+
 .theme-toggle:hover {
   background: var(--surface-hover);
   border-color: var(--accent);

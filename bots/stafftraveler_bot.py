@@ -299,7 +299,11 @@ async def _set_value_direct(page, selector: str, value: str) -> None:
         current = await field.input_value()
         if current.strip() != value.strip():
             await field.evaluate(
-                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); }",
+                """
+                    (el, val) => { el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    "el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); }
+                """,
                 value,
             )
     except Exception:

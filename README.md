@@ -3,7 +3,7 @@
 Runs three bots (myIDTravel, Google Flights, StaffTraveler) concurrently, streams logs over WebSocket, and serves a single-page UI for building inputs, triggering runs, and downloading consolidated outputs.
 
 ### Setup
-- `python -m venv env && source env/bin/activate`
+- `python -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements.txt`
 - `python -m playwright install chromium`
 - Set credentials in your shell or `.env`:

@@ -3,28 +3,34 @@ import json
 import logging
 import os
 import re
+import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import bcrypt
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import Page, async_playwright
+from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
+from starlette.middleware.sessions import SessionMiddleware
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env", override=True, interpolate=False)
 
 import config
 from bots import google_flights_bot, google_flights_bot_2, myidtravel_bot, stafftraveler_bot, stafftraveler_bot_2
+from db import create_run_record, ensure_data_dir, save_bot_response, update_run_record
 
 logger = logging.getLogger("globalpass")
 if not logging.getLogger().handlers:
@@ -33,9 +39,13 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_USER_OAUTH_TOKEN")
-SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_USER_OAUTH_TOKEN", "")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 SLACK_ENABLED = bool(SLACK_BOT_TOKEN and SLACK_APP_TOKEN)
+
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
 
 AIRLINE_OUTPUT = Path("airlines.json")
 ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")
@@ -55,6 +65,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if not SECRET_KEY:
+    logger.warning("SECRET_KEY is not set; session authentication will not work.")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+BODY_REQUIRED = Body(...)
+BODY_DEFAULT: dict[str, Any] = Body(default={})
+
+
+def _is_authenticated(request: Request) -> bool:
+    return bool(request.session.get("user"))
+
+
+def _verify_password(username: str, password: str) -> bool:
+    if not ADMIN_PASSWORD_HASH:
+        return False
+    if username != ADMIN_USERNAME:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode(), ADMIN_PASSWORD_HASH.encode())
+    except Exception:
+        return False
+
+
+@app.on_event("startup")
+async def _startup_db() -> None:
+    ensure_data_dir()
+
 
 OUTPUT_ROOT = Path("outputs")
 RUNS: dict[str, "RunState"] = {}
@@ -63,6 +100,15 @@ RUN_SEMAPHORE = asyncio.Semaphore(1)
 slack_web_client: AsyncWebClient | None = None
 slack_socket_client: SocketModeClient | None = None
 slack_connected: bool = False
+
+
+def _load_json_payload(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
 
 
 async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
@@ -89,7 +135,8 @@ async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
 
                 try:
                     # Add reaction to acknowledge
-                    await slack_web_client.reactions_add(channel=channel, timestamp=ts, name="white_check_mark")
+                    if slack_web_client:
+                        await slack_web_client.reactions_add(channel=channel, timestamp=ts, name="white_check_mark")
 
                     # Parse command for parameters (optional)
                     # Format: "run scraper [origin] [destination] [date]"
@@ -126,28 +173,39 @@ async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
                     state.slack_channel = channel
                     state.slack_thread_ts = ts
                     RUNS[run_id] = state
+                    create_run_record(
+                        run_id=run_id,
+                        input_data=input_data,
+                        output_dir=run_dir,
+                        status=state.status,
+                        slack_channel=channel,
+                        slack_thread_ts=ts,
+                    )
 
                     # Send initial confirmation
-                    await slack_web_client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=ts,
-                        text=f"<@{user}> Scraper started! :rocket:\n"
-                        f"Run ID: `{run_id}`\n"
-                        f"Route: {input_data['trips'][0]['origin']} → {input_data['trips'][0]['destination']}\n"
-                        f"Status: Running...",
-                    )
+                    if slack_web_client:
+                        await slack_web_client.chat_postMessage(
+                            channel=channel,
+                            thread_ts=ts,
+                            text=f"<@{user}> Scraper started! :rocket:\n"
+                            f"Run ID: `{run_id}`\n"
+                            f"Route: {input_data['trips'][0]['origin']} → {input_data['trips'][0]['destination']}\n"
+                            f"Status: Running...",
+                        )
 
                     # Start the run
                     asyncio.create_task(execute_run(state, limit=30, headed=False))
 
                 except Exception as e:
                     logger.error(f"Error processing Slack command: {e}", exc_info=True)
-                    try:
-                        await slack_web_client.chat_postMessage(
-                            channel=channel, thread_ts=ts, text=f"<@{user}> Error starting scraper: {str(e)} :x:"
-                        )
-                    except:
-                        pass
+
+                    if slack_web_client:
+                        try:
+                            await slack_web_client.chat_postMessage(
+                                channel=channel, thread_ts=ts, text=f"<@{user}> Error starting scraper: {str(e)} :x:"
+                            )
+                        except Exception:
+                            pass
 
             # Check for "scraper status" command
             elif "scraper status" in text:
@@ -175,7 +233,8 @@ async def process_slack_event(client: SocketModeClient, req: SocketModeRequest):
 
                         status_text = "\n".join(status_lines)
 
-                    await slack_web_client.chat_postMessage(channel=channel, thread_ts=ts, text=status_text)
+                    if slack_web_client:
+                        await slack_web_client.chat_postMessage(channel=channel, thread_ts=ts, text=status_text)
 
                 except Exception as e:
                     logger.error(f"Error checking status: {e}", exc_info=True)
@@ -194,7 +253,7 @@ async def start_slack_bot():
         slack_socket_client = SocketModeClient(app_token=SLACK_APP_TOKEN, web_client=slack_web_client)
 
         # Register event handler
-        slack_socket_client.socket_mode_request_listeners.append(process_slack_event)
+        slack_socket_client.socket_mode_request_listeners.append(process_slack_event)  # type: ignore
 
         # Connect in background
         await slack_socket_client.connect()
@@ -324,9 +383,10 @@ class RunState:
             else:
                 return  # Don't send updates for pending/running status
 
-            await slack_web_client.chat_postMessage(
-                channel=self.slack_channel, thread_ts=self.slack_thread_ts, text=message
-            )
+            if slack_web_client and self.slack_channel:
+                await slack_web_client.chat_postMessage(
+                    channel=self.slack_channel, thread_ts=self.slack_thread_ts, text=message
+                )
             logger.info("Successfully sent Slack notification for run %s", self.id)
 
         except Exception as e:
@@ -340,7 +400,7 @@ class RunState:
 
         try:
             # Get default channel from environment or use a specific channel
-            channel = os.environ.get("SLACK_CHANNEL_ID")  # Replace with your channel ID
+            channel = os.environ.get("SLACK_CHANNEL_ID", "")  # Replace with your channel ID
             logger.info(f"Attempting to send Slack notification to channel: {channel}")
 
             # Format input data
@@ -385,11 +445,12 @@ class RunState:
 
             logger.info(f"Sent initial Slack notification for run {self.id}")
 
+        except SlackApiError as e:
+            logger.error(f"Slack API response: {e.response}")
+
         except Exception as e:
             logger.error(f"Failed to send initial Slack notification: {e}", exc_info=True)
             logger.error(f"Error type: {type(e).__name__}")
-            if hasattr(e, "response"):
-                logger.error(f"Slack API response: {e.response}")
 
     async def update_slack_status(self, status_text: str):
         """Update the status line in the original Slack message"""
@@ -441,7 +502,10 @@ class RunState:
         """Send completion notification with top 5 flights as a thread reply"""
         if not self.slack_channel or not self.slack_thread_ts or not slack_web_client:
             logger.warning(
-                f"Cannot send completion notification - channel: {self.slack_channel}, ts: {self.slack_thread_ts}, client: {bool(slack_web_client)}"
+                "Cannot send completion notification - channel: %s, ts: %s, client: %s",
+                self.slack_channel,
+                self.slack_thread_ts,
+                bool(slack_web_client),
             )
             return
 
@@ -518,11 +582,12 @@ class RunState:
 
             logger.info(f"Sent completion reply to thread for run {self.id}")
 
+        except SlackApiError as e:
+            logger.error(f"Slack API response: {e.response}")
+
         except Exception as e:
             logger.error(f"Failed to send completion reply: {e}", exc_info=True)
             logger.error(f"Error type: {type(e).__name__}")
-            if hasattr(e, "response"):
-                logger.error(f"Slack API response: {e.response}")
 
 
 @contextmanager
@@ -822,7 +887,7 @@ def normalize_google_time(time_str: str) -> str | None:
     try:
         time_str = time_str.replace("\u202f", " ").strip()
         return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
-    except:
+    except Exception:
         return None
 
 
@@ -836,7 +901,7 @@ def to_minutes(duration_str: str) -> int:
         m_part = clean.split("h")[-1] if "h" in clean else clean
         m = int(m_part.replace("m", "")) if "m" in m_part else 0
         return h * 60 + m
-    except:
+    except Exception:
         return 1440
 
 
@@ -848,11 +913,12 @@ async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> dic
 
         async def _notify(msg: str) -> None:
             try:
-                await slack_web_client.chat_postMessage(
-                    channel=state.slack_channel,
-                    thread_ts=state.slack_thread_ts,
-                    text=msg,
-                )
+                if slack_web_client and state.slack_channel:
+                    await slack_web_client.chat_postMessage(
+                        channel=state.slack_channel,
+                        thread_ts=state.slack_thread_ts,
+                        text=msg,
+                    )
             except Exception as exc:
                 logger.debug("Slack notify failed: %s", exc)
 
@@ -873,11 +939,34 @@ async def run_myidtravel(state: RunState, input_path: Path, headed: bool) -> dic
         if output_path.exists():
             state.result_files["myidtravel"] = output_path
             await state.log(f"[myidtravel] wrote results to {output_path}")
+            save_bot_response(
+                run_id=state.id,
+                bot_name="myidtravel",
+                status="ok",
+                output_path=output_path,
+                payload=_load_json_payload(output_path),
+            )
         else:
             await state.log("[myidtravel] finished but output file was not found")
+            save_bot_response(
+                run_id=state.id,
+                bot_name="myidtravel",
+                status="error",
+                output_path=output_path,
+                payload=None,
+                error="output file not found",
+            )
         return {"name": "myidtravel", "status": "ok", "output": str(output_path)}
     except Exception as exc:
         await state.log(f"[myidtravel] error: {exc}")
+        save_bot_response(
+            run_id=state.id,
+            bot_name="myidtravel",
+            status="error",
+            output_path=output_path,
+            payload=None,
+            error=str(exc),
+        )
         return {"name": "myidtravel", "status": "error", "error": str(exc)}
 
 
@@ -889,11 +978,12 @@ async def run_google_flights(state: RunState, input_path: Path, limit: int, head
 
         async def _notify(msg: str) -> None:
             try:
-                await slack_web_client.chat_postMessage(
-                    channel=state.slack_channel,
-                    thread_ts=state.slack_thread_ts,
-                    text=msg,
-                )
+                if slack_web_client and state.slack_channel:
+                    await slack_web_client.chat_postMessage(
+                        channel=state.slack_channel,
+                        thread_ts=state.slack_thread_ts,
+                        text=msg,
+                    )
             except Exception as exc:
                 logger.debug("Slack notify failed: %s", exc)
 
@@ -912,9 +1002,24 @@ async def run_google_flights(state: RunState, input_path: Path, limit: int, head
             google_flights_bot.set_notifier(None)
         state.result_files["google_flights"] = output_path
         await state.log(f"[google_flights] wrote results to {output_path}")
+        save_bot_response(
+            run_id=state.id,
+            bot_name="google_flights",
+            status="ok",
+            output_path=output_path,
+            payload=_load_json_payload(output_path),
+        )
         return {"name": "google_flights", "status": "ok", "output": str(output_path)}
     except Exception as exc:
         await state.log(f"[google_flights] error: {exc}")
+        save_bot_response(
+            run_id=state.id,
+            bot_name="google_flights",
+            status="error",
+            output_path=output_path,
+            payload=None,
+            error=str(exc),
+        )
         return {"name": "google_flights", "status": "error", "error": str(exc)}
 
 
@@ -929,11 +1034,12 @@ async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> 
 
         async def _notify(msg: str) -> None:
             try:
-                await slack_web_client.chat_postMessage(
-                    channel=state.slack_channel,
-                    thread_ts=state.slack_thread_ts,
-                    text=msg,
-                )
+                if slack_web_client and state.slack_channel:
+                    await slack_web_client.chat_postMessage(
+                        channel=state.slack_channel,
+                        thread_ts=state.slack_thread_ts,
+                        text=msg,
+                    )
             except Exception as exc:
                 logger.debug("Slack notify failed: %s", exc)
 
@@ -953,15 +1059,31 @@ async def run_stafftraveler(state: RunState, input_path: Path, headed: bool) -> 
 
         state.result_files["stafftraveler"] = output_path
         await state.log(f"[stafftraveler] wrote results to {output_path}")
+        save_bot_response(
+            run_id=state.id,
+            bot_name="stafftraveler",
+            status="ok",
+            output_path=output_path,
+            payload=_load_json_payload(output_path),
+        )
         return {"name": "stafftraveler", "status": "ok", "output": str(output_path)}
     except Exception as exc:
         await state.log(f"[stafftraveler] error: {exc}")
+        save_bot_response(
+            run_id=state.id,
+            bot_name="stafftraveler",
+            status="error",
+            output_path=output_path,
+            payload=None,
+            error=str(exc),
+        )
         return {"name": "stafftraveler", "status": "error", "error": str(exc)}
 
 
 async def execute_run(state: RunState, limit: int, headed: bool) -> None:
     async with RUN_SEMAPHORE:
         state.status = "running"
+        update_run_record(run_id=state.id, status=state.status, error=None, completed_at=None)
         await state.push_status()
 
         # Send initial Slack notification if run was triggered from web interface
@@ -975,6 +1097,7 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
             state.status = "error"
             state.error = "invalid input"
             state.completed_at = datetime.utcnow()
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
             await state.push_status()
             state.done.set()
             return
@@ -1001,6 +1124,7 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         state.status = "error" if had_error else "completed"
         state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
         state.completed_at = datetime.utcnow()
+        update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
         await state.log("Run finished." if not had_error else "Run finished with errors.")
         logger.info("Run %s completed status=%s", state.id, state.status)
 
@@ -1467,7 +1591,7 @@ async def _run_generate_flight_loads(state: RunState) -> None:
                     else:
                         g_airline = g_f.get("airline", "")
                         g_duration = to_minutes(g_f.get("duration", "0h 0m"))
-                        for reg_fn, data in registry.items():
+                        for _reg_fn, data in registry.items():
                             if data["Airline"] == g_airline and abs(data["Duration"] - g_duration) <= 5:
                                 if price is not None:
                                     data["Price"] = price
@@ -1823,7 +1947,7 @@ async def logs_ws(websocket: WebSocket, run_id: str):
 
 
 @app.post("/api/run")
-async def start_run(payload: dict[str, Any] = Body(...)):
+async def start_run(payload: dict[str, Any] = BODY_REQUIRED):
     input_data = payload.get("input") if isinstance(payload, dict) else None
     if not input_data:
         input_data = payload
@@ -1846,6 +1970,7 @@ async def start_run(payload: dict[str, Any] = Body(...)):
 
     state = RunState(run_id, run_dir, input_data)
     RUNS[run_id] = state
+    create_run_record(run_id=run_id, input_data=input_data, output_dir=run_dir, status=state.status)
 
     logger.info("Queued run %s", run_id)
     asyncio.create_task(execute_run(state, limit=limit, headed=headed))
@@ -1853,7 +1978,7 @@ async def start_run(payload: dict[str, Any] = Body(...)):
 
 
 @app.post("/api/find-flight")
-async def find_flight(payload: dict[str, Any] = Body(...)):
+async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
     input_data = payload.get("input") if isinstance(payload, dict) else None
     if not input_data:
         input_data = payload
@@ -1864,6 +1989,7 @@ async def find_flight(payload: dict[str, Any] = Body(...)):
     run_id = make_run_id()
     run_dir = OUTPUT_ROOT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    create_run_record(run_id=run_id, input_data=input_data, output_dir=run_dir, status="running")
 
     input_path = run_dir / "input.json"
     input_path.write_text(json.dumps(input_data, indent=2))
@@ -1894,6 +2020,8 @@ async def find_flight(payload: dict[str, Any] = Body(...)):
     results = await asyncio.gather(_run_google(), _run_staff(), return_exceptions=True)
     errors = [str(res) for res in results if isinstance(res, Exception)]
     status = "error" if errors else "completed"
+    google_error = str(results[0]) if isinstance(results[0], Exception) else None
+    staff_error = str(results[1]) if isinstance(results[1], Exception) else None
 
     google_payload = []
     staff_payload = []
@@ -1907,6 +2035,29 @@ async def find_flight(payload: dict[str, Any] = Body(...)):
             staff_payload = json.loads(staff_output.read_text())
     except Exception:
         staff_payload = []
+
+    save_bot_response(
+        run_id=run_id,
+        bot_name="google_flights",
+        status="error" if google_error else "ok",
+        output_path=google_output,
+        payload=google_payload if google_payload else None,
+        error=google_error,
+    )
+    save_bot_response(
+        run_id=run_id,
+        bot_name="stafftraveler",
+        status="error" if staff_error else "ok",
+        output_path=staff_output,
+        payload=staff_payload if staff_payload else None,
+        error=staff_error,
+    )
+    update_run_record(
+        run_id=run_id,
+        status=status,
+        error=", ".join(errors) if errors else None,
+        completed_at=datetime.utcnow(),
+    )
 
     return {
         "run_id": run_id,
@@ -1981,7 +2132,7 @@ async def download_report_xlsx(run_id: str):
 
 
 @app.post("/api/scrape-airlines")
-async def scrape_airlines_api(payload: dict[str, Any] = Body(default={})):
+async def scrape_airlines_api(payload: dict[str, Any] = BODY_DEFAULT):
     """
     Run the airline dropdown scraper using existing auth_state.json.
     """
@@ -1996,15 +2147,97 @@ async def scrape_airlines_api(payload: dict[str, Any] = Body(default={})):
         )
         return {"status": "ok", **result}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
+async def index(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=302)
     index_path = Path("index.html")
     if index_path.exists():
         return HTMLResponse(index_path.read_text())
     return HTMLResponse("<h1>Globalpass Bot</h1><p>UI not found.</p>")
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if _is_authenticated(request):
+        return RedirectResponse(url="/", status_code=302)
+    return HTMLResponse(
+        """
+        <html>
+            <head>
+                <title>Login</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        background: #f5f5f5;
+                    }
+                    .card {
+                        max-width: 360px;
+                        margin: 10vh auto;
+                        background: #fff;
+                        padding: 24px;
+                        border-radius: 8px;
+                        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+                    }
+                    label {
+                        display: block;
+                        margin-bottom: 6px;
+                        font-weight: 600;
+                    }
+                    input {
+                        width: 100%;
+                        padding: 10px;
+                        margin-bottom: 12px;
+                        border: 1px solid #ddd;
+                        border-radius: 6px;
+                    }
+                    button {
+                        width: 100%;
+                        padding: 10px;
+                        background: #111827;
+                        color: #fff;
+                        border: none;
+                        border-radius: 6px;
+                        font-weight: 600;
+                        cursor: pointer;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h2>Admin Login</h2>
+                    <form method="post" action="/login">
+                        <label for="username">Username</label>
+                        <input id="username" name="username" type="text" required />
+                        <label for="password">Password</label>
+                        <input id="password" name="password" type="password" required />
+                        <button type="submit">Sign in</button>
+                    </form>
+                </div>
+            </body>
+        </html>
+        """
+    )
+
+
+@app.post("/login")
+async def login(request: Request):
+    form = await request.form()
+    username = str(form.get("username") or "").strip()
+    password = str(form.get("password") or "").strip()
+    if _verify_password(username, password):
+        request.session["user"] = username
+        return RedirectResponse(url="/", status_code=302)
+    return HTMLResponse("<h3>Invalid credentials</h3><a href='/login'>Try again</a>", status_code=401)
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=302)
 
 
 @app.get("/airlines.json")
