@@ -40,7 +40,6 @@ async def perform_login(headless: bool, screenshot: str | None) -> None:
         if screenshot:
             await page.screenshot(path=screenshot, full_page=True)
 
-        await context.storage_state(path="auth_state.json")
         await browser.close()
 
 
