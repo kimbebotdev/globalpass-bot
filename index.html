@@ -165,121 +165,118 @@
       <!-- Left Panel - Flight Details -->
       <div class="left-panel">
         <div class="panel">
-          <div class="status-row">
-            <h3>Flight Details</h3>
-            <span class="pill pending" id="status-pill">idle</span>
-            <span class="badge" id="run-id"></span>
-            <div style="flex: 1;"></div>
-            <label class="switch-container" id="headed-toggle">
-              <span class="switch-label">Show Browser</span>
-              <input type="checkbox" id="headed" class="switch-input">
-              <span class="switch-slider"></span>
-            </label>
-          </div>
-          <form id="run-form">
-            <!-- Input Mode Selector -->
-            <div class="input-mode-selector">
-              <div class="mode-option">
-                <input type="radio" name="input_source" id="input-source-form" value="form" checked>
-                <label for="input-source-form" class="mode-label">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                    <line x1="16" y1="13" x2="8" y2="13"></line>
-                    <line x1="16" y1="17" x2="8" y2="17"></line>
-                    <polyline points="10 9 9 9 8 9"></polyline>
-                  </svg>
-                  <span>Form Input</span>
-                </label>
-              </div>
-              <div class="mode-option">
-                <input type="radio" name="input_source" id="input-source-json" value="json">
-                <label for="input-source-json" class="mode-label">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="16 18 22 12 16 6"></polyline>
-                    <polyline points="8 6 2 12 8 18"></polyline>
-                  </svg>
-                  <span>JSON Input</span>
-                </label>
-              </div>
+            <div class="status-row">
+              <h3>Flight Details</h3>
+              <span class="pill pending" id="status-pill">idle</span>
+              <span class="badge" id="run-id"></span>
+              <div style="flex: 1;"></div>
+              <label class="switch-container" id="headed-toggle">
+                <span class="switch-label">Show Browser</span>
+                <input type="checkbox" id="headed" class="switch-input">
+                <span class="switch-slider"></span>
+              </label>
             </div>
-
-            <!-- Form Input Section -->
+            <form id="run-form">
             <div id="form-input-section">
-              <div class="field-grid">
-                <label>Flight Type
-                  <select id="flight_type">
-                    <option value="one-way">One-way</option>
-                    <option value="round-trip">Round trip</option>
-                    <option value="multiple-legs">Multiple legs / Multi-city</option>
-                  </select>
-                </label>
-                <label>Travel Status
-                  <select id="travel_status">
-                    <option value="R2 Standby">R2 Standby</option>
-                    <option value="Bookable">Bookable</option>
-                  </select>
-                </label>
-                <label>Airline
-                  <select id="airline">
+              <div class="leg-header">
+                <div>
+                  <div class="leg-title">Account (required)</div>
+                  <div class="leg-subtitle">Select the employee account to run this search.</div>
+                </div>
+              </div>
+              <div class="field-grid" style="margin-top: 15px;">
+                <label>Employee Account
+                  <select id="account-select" required>
                     <option value="">Loading...</option>
                   </select>
                 </label>
-                <label style="flex-direction: row; align-items: center; gap: 10px;">
-                  <input id="nonstop_flights" type="checkbox">
-                  <span>Non-stop only</span>
-                </label>
               </div>
 
-              <div class="leg-header">
-                <div>
-                  <div class="leg-title">Travel Partners (optional)</div>
-                  <div class="leg-subtitle">Add adults or children traveling with you.</div>
+              <div id="account-dependent" style="display: none;">
+                <div class="leg-header">
+                  <div>
+                    <div class="leg-title">Flight Details</div>
+                    <div class="leg-subtitle">Choose flight options before adding trips.</div>
+                  </div>
                 </div>
-                <span class="badge" id="travel-partners-count">0</span>
-                <button class="ghost" type="button" id="toggle-travel-partners">Show</button>
-              </div>
-              <div id="travel-partners-section" style="display: none;">
-                <div id="travel-partners-container" class="legs"></div>
-                <div class="leg-header" style="margin-top: 8px;">
-                  <div></div>
-                  <button class="ghost" type="button" id="add-travel-partner">+ Add Travel Partner</button>
+                <div class="field-grid" style="margin-top: 15px;">
+                  <label>Flight Type
+                    <select id="flight_type">
+                      <option value="one-way">One-way</option>
+                      <option value="round-trip">Round trip</option>
+                      <option value="multiple-legs">Multiple legs / Multi-city</option>
+                    </select>
+                  </label>
+                  <label>Travel Status
+                    <select id="travel_status">
+                      <option value="R2 Standby">R2 Standby</option>
+                      <option value="Bookable">Bookable</option>
+                    </select>
+                  </label>
+                  <label>Airline
+                    <select id="airline">
+                      <option value="">Loading...</option>
+                    </select>
+                  </label>
+                  <label style="flex-direction: row; align-items: center; gap: 10px;">
+                    <input id="nonstop_flights" type="checkbox">
+                    <span>Non-stop only</span>
+                  </label>
                 </div>
-              </div>
 
-              <div class="leg-header">
-                <div>
-                  <div class="leg-title">Trips & Itinerary</div>
-                  <div class="leg-subtitle">Add legs based on flight type (one-way: 1 leg, round-trip: 2 legs,
-                    multi-city: many)</div>
+                <div class="leg-header">
+                  <div>
+                    <div class="leg-title-row">
+                      <div class="leg-title">Travel Partners (optional)</div>
+                      <span class="badge" id="travel-partners-count">1</span>
+                    </div>
+                    <div class="leg-subtitle">Add adults or children traveling with you.</div>
+                  </div>
+                  <button class="ghost" type="button" id="toggle-travel-partners">Show</button>
                 </div>
-                <button class="ghost" type="button" id="add-flight">+ Add Flight</button>
-              </div>
-              <div id="legs-container" class="legs"></div>
-            </div>
+                <div id="travel-partners-modal" class="modal" aria-hidden="true">
+                  <div class="modal-backdrop" data-modal-close></div>
+                  <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="travel-partners-title">
+                    <div class="modal-header">
+                      <h3 id="travel-partners-title">Travel Partners</h3>
+                      <button class="ghost" type="button" data-modal-close>Close</button>
+                    </div>
+                    <div class="modal-body">
+                      <div id="travel-partners-section">
+                        <div class="traveller-selector" style="margin-top: 15px;">
+                          <div class="leg-header compact-header">
+                            <div>
+                              <div class="leg-title">Account Travellers</div>
+                              <div class="leg-subtitle">Select up to 8 travellers for this account.</div>
+                            </div>
+                            <button class="ghost" type="button" id="toggle-travellers"> + </button>
+                          </div>
+                          <div id="traveller-list" class="traveller-list" style="display: none; margin-top: 15px;"></div>
+                        </div>
+                        <div class="traveller-selector" style="margin-top: 12px;">
+                          <div class="leg-header compact-header">
+                            <div>
+                              <div class="leg-title">Additional Travel Partners</div>
+                              <div class="leg-subtitle">Add up to 2 adults or children traveling with you.</div>
+                            </div>
+                            <button class="ghost" type="button" id="add-travel-partner"> + </button>
+                          </div>
+                          <div id="travel-partners-container" class="legs"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
-            <!-- JSON Input Section -->
-            <div id="json-input-section" style="display: none;">
-              <label>Raw JSON Payload
-                <textarea id="raw-json" placeholder='Paste or drop input.json here'></textarea>
-              </label>
-              <div class="json-actions">
-                <input type="file" id="file-input" accept=".json" hidden>
-                <button class="ghost" type="button" id="load-file">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="17 8 12 3 7 8"></polyline>
-                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                  </svg>
-                  Import JSON
-                </button>
-                <button class="ghost" type="button" id="load-sample">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                    <polyline points="13 2 13 9 20 9"></polyline>
-                  </svg>
-                  Load Sample
-                </button>
+                <div class="leg-header">
+                  <div>
+                    <div class="leg-title">Trips & Itinerary</div>
+                    <div class="leg-subtitle">Add legs based on flight type (one-way: 1 leg, round-trip: 2 legs,
+                      multi-city: many)</div>
+                  </div>
+                  <button class="ghost" type="button" id="add-flight">+ Add Flight</button>
+                </div>
+                <div id="legs-container" class="legs"></div>
               </div>
             </div>
 
@@ -300,37 +297,60 @@
         <!-- Compact Live Logs -->
         <div class="panel compact-panel">
           <div class="status-row">
-            <h3>Live Logs</h3>
-            <span class="badge" id="status-label">waiting</span>
-          </div>
-          <div class="log-feed compact-log" id="log-feed">Awaiting bot execution...</div>
-        </div>
-
-        <!-- Results & Reports -->
-        <div class="panel">
-          <div class="status-row">
-            <h3>Results & Reports</h3>
+            <h3>Bot Progress</h3>
             <div style="flex: 1;"></div>
-            <button class="ghost" type="button" id="download-json" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="7 10 12 15 17 10"></polyline>
-                <line x1="12" y1="15" x2="12" y2="3"></line>
-              </svg>
-              Export JSON
-            </button>
             <button class="ghost" type="button" id="download-xlsx" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                 <polyline points="14 2 14 8 20 8"></polyline>
               </svg>
-              Export Excel
+              Download Excel
             </button>
+            <span class="badge" id="status-label">waiting</span>
           </div>
-          <div class="file-row" id="file-list"></div>
-          <div class="tabs" id="report-tabs"></div>
-          <div class="results" id="results-block">Awaiting results. Run the bot to see output here.</div>
+          <div class="bot-progress">
+            <div class="bot-card" data-bot="myidtravel">
+              <div class="bot-header">
+                <span class="bot-icon">
+                  <img src="/static/images/myidt-icon.webp" alt="MyIDTravel">
+                </span>
+                <span class="bot-name">MyIDTravel</span>
+                <span class="bot-status" id="bot-status-myidtravel">idle</span>
+              </div>
+              <div class="bot-bar">
+                <div class="bot-bar-fill" id="bot-progress-myidtravel" style="width: 0%;"></div>
+              </div>
+              <div class="bot-caption" id="bot-caption-myidtravel">Waiting for run.</div>
+            </div>
+            <div class="bot-card" data-bot="google_flights">
+              <div class="bot-header">
+                <span class="bot-icon">
+                  <img src="/static/images/gf-icon.webp" alt="Google Flights">
+                </span>
+                <span class="bot-name">Google Flights</span>
+                <span class="bot-status" id="bot-status-google_flights">idle</span>
+              </div>
+              <div class="bot-bar">
+                <div class="bot-bar-fill" id="bot-progress-google_flights" style="width: 0%;"></div>
+              </div>
+              <div class="bot-caption" id="bot-caption-google_flights">Waiting for run.</div>
+            </div>
+            <div class="bot-card" data-bot="stafftraveler">
+              <div class="bot-header">
+                <span class="bot-icon">
+                  <img src="/static/images/st-icon.webp" alt="StaffTraveler">
+                </span>
+                <span class="bot-name">StaffTraveler</span>
+                <span class="bot-status" id="bot-status-stafftraveler">idle</span>
+              </div>
+              <div class="bot-bar">
+                <div class="bot-bar-fill" id="bot-progress-stafftraveler" style="width: 0%;"></div>
+              </div>
+              <div class="bot-caption" id="bot-caption-stafftraveler">Waiting for run.</div>
+            </div>
+          </div>
         </div>
+        
       </div>
     </div>
   </div>

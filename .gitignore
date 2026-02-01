@@ -12,6 +12,7 @@ __pycache__
 
 outputs
 .venv
+env
 json
 data
 
