@@ -6,9 +6,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 
-from models import LookupBotResponse, Run, StandbyBotResponse
+from models import LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
 
 load_dotenv()
 
@@ -137,3 +137,53 @@ def save_lookup_response(
             session.commit()
     except Exception as exc:
         logger.warning("Failed to persist lookup response for %s: %s", run_id, exc)
+
+
+def get_account_options() -> list[dict[str, Any]]:
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(
+                    MyidtravelAccount.id,
+                    MyidtravelAccount.employee_name,
+                    MyidtravelAccount.travellers,
+                )
+                .join(
+                    StafftravelerAccount,
+                    StafftravelerAccount.employee_name == MyidtravelAccount.employee_name,
+                )
+                .order_by(MyidtravelAccount.employee_name)
+            )
+            rows = session.exec(statement).all()
+        return [
+            {
+                "id": row[0],
+                "employee_name": row[1],
+                "travellers": row[2] or [],
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.warning("Failed to fetch account options: %s", exc)
+        return []
+
+
+def get_myidtravel_account(account_id: int) -> MyidtravelAccount | None:
+    try:
+        with Session(engine) as session:
+            return session.get(MyidtravelAccount, account_id)
+    except Exception as exc:
+        logger.warning("Failed to fetch myidtravel account %s: %s", account_id, exc)
+        return None
+
+
+def get_stafftraveler_account_by_employee_name(employee_name: str) -> StafftravelerAccount | None:
+    try:
+        with Session(engine) as session:
+            statement = select(StafftravelerAccount).where(
+                StafftravelerAccount.employee_name == employee_name
+            )
+            return session.exec(statement).first()
+    except Exception as exc:
+        logger.warning("Failed to fetch stafftraveler account for %s: %s", employee_name, exc)
+        return None

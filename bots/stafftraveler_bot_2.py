@@ -261,6 +261,7 @@ async def perform_stafftraveller_login(
     screenshot: str | None,
     output_path: Path | None = None,
     input_data: dict | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
     logger.info("Starting StaffTraveler login headless=%s", headless)
     username = os.getenv("ST_USERNAME")
@@ -269,6 +270,8 @@ async def perform_stafftraveller_login(
         raise SystemExit("Set ST_USERNAME and ST_PASSWORD in your environment before running.")
 
     async with async_playwright() as p:
+        if progress_cb:
+            await progress_cb(5, "launching")
         browser = await p.chromium.launch(
             headless=headless,
             args=["--disable-blink-features=AutomationControlled"],
@@ -281,6 +284,8 @@ async def perform_stafftraveller_login(
         page = await context.new_page()
 
         await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        if progress_cb:
+            await progress_cb(15, "loaded")
         await page.wait_for_timeout(800)  # allow client-side scripts to mount
         await _dismiss_banners(page)
 
@@ -370,9 +375,13 @@ async def perform_stafftraveller_login(
             )
 
         await _expand_all_flight_cards(page)
+        if progress_cb:
+            await progress_cb(70, "results loaded")
         raw_number = (input_data or {}).get("flight_number")
         target_number = raw_number.upper() if isinstance(raw_number, str) else raw_number
         results = await _scrape_all_flights(page, flight_number=target_number)
+        if progress_cb:
+            await progress_cb(85, "parsed")
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(results, indent=2))
@@ -383,10 +392,14 @@ async def perform_stafftraveller_login(
                 screenshot_path = Path(screenshot)
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(screenshot_path), full_page=True)
+                if progress_cb:
+                    await progress_cb(95, "screenshot")
             except Exception:
                 pass
 
         await browser.close()
+        if progress_cb:
+            await progress_cb(100, "done")
         return results
     return []
 
