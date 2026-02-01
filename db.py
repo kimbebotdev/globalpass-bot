@@ -93,6 +93,7 @@ def save_standby_response(
     google_flights_payload: Any | None,
     stafftraveler_payload: Any | None,
     gemini_payload: Any | None,
+    standby_bots_payload: dict[str, Any] | None,
     error: str | None = None,
 ) -> None:
     try:
@@ -104,6 +105,7 @@ def save_standby_response(
                 google_flights_payload=google_flights_payload,
                 stafftraveler_payload=stafftraveler_payload,
                 gemini_payload=gemini_payload,
+                standby_bots_payload=standby_bots_payload,
                 output_paths=output_paths,
                 error=error,
                 created_at=datetime.utcnow(),
