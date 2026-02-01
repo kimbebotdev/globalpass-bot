@@ -736,6 +736,11 @@ def _validate_and_normalize_input(input_data: dict[str, Any]) -> tuple[dict[str,
     normalized["airline"] = normalized.get("airline") or ""
     if "nonstop_flights" not in normalized or normalized.get("nonstop_flights") in ("", None):
         normalized["nonstop_flights"] = False
+    if "auto_request_stafftraveler" not in normalized or normalized.get("auto_request_stafftraveler") in (
+        "",
+        None,
+    ):
+        normalized["auto_request_stafftraveler"] = False
 
     trips = normalized.get("trips")
     if not isinstance(trips, list) or not trips:
@@ -1185,6 +1190,11 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
             google_flights_payload=google_payload,
             stafftraveler_payload=staff_payload,
             gemini_payload=gemini_payload,
+            standby_bots_payload={
+                "myidtravel": myid_payload,
+                "google_flights": google_payload,
+                "stafftraveler": staff_payload,
+            },
             error=", ".join(res.get("error", "") for res in results if res.get("error")) or None,
         )
 

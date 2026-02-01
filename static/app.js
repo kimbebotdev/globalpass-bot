@@ -487,6 +487,7 @@ function buildPayload() {
     airline: airlineSelect.value,
     travel_status: travelStatusSelect.value,
     nonstop_flights: document.getElementById("nonstop_flights").checked,
+    auto_request_stafftraveler: document.getElementById("auto_request_stafftraveler").checked,
     traveller: selectedTravellers.map((traveller) => ({
       name: traveller.name,
       salutation: traveller.salutation || "",
