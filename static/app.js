@@ -5,12 +5,7 @@ const statusLabel = document.getElementById("status-label");
 const runIdEl = document.getElementById("run-id");
 const resultsBlock = document.getElementById("results-block");
 const fileList = document.getElementById("file-list");
-const downloadJsonBtn = document.getElementById("download-json");
 const downloadXlsxBtn = document.getElementById("download-xlsx");
-const rawJson = document.getElementById("raw-json");
-const loadFileBtn = document.getElementById("load-file");
-const fileInput = document.getElementById("file-input");
-const loadSampleBtn = document.getElementById("load-sample");
 const flightTypeSelect = document.getElementById("flight_type");
 const airlineSelect = document.getElementById("airline");
 const travelStatusSelect = document.getElementById("travel_status");
@@ -21,10 +16,14 @@ const addTravelPartnerBtn = document.getElementById("add-travel-partner");
 const travelPartnersSection = document.getElementById("travel-partners-section");
 const travelPartnersContainer = document.getElementById("travel-partners-container");
 const travelPartnersCount = document.getElementById("travel-partners-count");
-const inputSourceForm = document.getElementById("input-source-form");
-const inputSourceJson = document.getElementById("input-source-json");
 const formInputSection = document.getElementById("form-input-section");
-const jsonInputSection = document.getElementById("json-input-section");
+const accountSelect = document.getElementById("account-select");
+const accountDependent = document.getElementById("account-dependent");
+const travelPartnersModal = document.getElementById("travel-partners-modal");
+const modalCloseButtons = travelPartnersModal?.querySelectorAll("[data-modal-close]") || [];
+const toggleTravellersBtn = document.getElementById("toggle-travellers");
+const travellerList = document.getElementById("traveller-list");
+const runBtn = document.getElementById("run-btn");
 const headedToggle = document.getElementById("headed-toggle");
 const findFlightToggle = document.getElementById("find-flight-toggle");
 const findFlightContent = document.getElementById("find-flight-content");
@@ -33,6 +32,27 @@ const findFlightAirlineSelect = document.getElementById("find-flight-airline");
 const findFlightForm = document.getElementById("find-flight-form");
 const findFlightResults = document.getElementById("find-flight-results");
 const findFlightHeadedToggle = document.getElementById("find-flight-headed-toggle");
+
+const botProgress = {
+  myidtravel: {
+    bar: document.getElementById("bot-progress-myidtravel"),
+    status: document.getElementById("bot-status-myidtravel"),
+    caption: document.getElementById("bot-caption-myidtravel"),
+    card: document.querySelector('[data-bot="myidtravel"]'),
+  },
+  google_flights: {
+    bar: document.getElementById("bot-progress-google_flights"),
+    status: document.getElementById("bot-status-google_flights"),
+    caption: document.getElementById("bot-caption-google_flights"),
+    card: document.querySelector('[data-bot="google_flights"]'),
+  },
+  stafftraveler: {
+    bar: document.getElementById("bot-progress-stafftraveler"),
+    status: document.getElementById("bot-status-stafftraveler"),
+    caption: document.getElementById("bot-caption-stafftraveler"),
+    card: document.querySelector('[data-bot="stafftraveler"]'),
+  },
+};
 
 const classOptions = ["Economy", "Premium Economy", "Business", "First"];
 const timeOptions = Array.from(
@@ -67,34 +87,9 @@ let ws;
 let currentRunId = null;
 let legs = [createLeg()];
 let travelPartners = [];
-
-const sampleInput = {
-  flight_type: "one-way",
-  nonstop_flights: true,
-  airline: "",
-  travel_status: "Bookable",
-  trips: [
-    {
-      origin: "DXB",
-      destination: "SIN",
-    },
-  ],
-  itinerary: [
-    {
-      date: "02/01/2026",
-      time: "00:00",
-      class: "Economy",
-    },
-  ],
-  traveller: [
-    {
-      name: "Rafael Cruz",
-      salutation: "MR",
-      checked: true,
-    },
-  ],
-  travel_partner: [],
-};
+let selectedTravellers = [];
+let accountTravellers = [];
+const accountById = new Map();
 
 function createLeg(overrides = {}) {
   return {
@@ -128,10 +123,125 @@ function setStatus(status, text) {
 }
 
 function appendLog(msg) {
+  if (!logFeed) return;
   const line = document.createElement("div");
   line.textContent = msg;
   logFeed.appendChild(line);
   logFeed.scrollTop = logFeed.scrollHeight;
+}
+
+function setBotProgress(botKey, state, percentOverride = null, captionText = "") {
+  const entry = botProgress[botKey];
+  if (!entry) return;
+  const { bar, status, caption, card } = entry;
+  let percent = 0;
+  let label = "idle";
+  if (state === "running") {
+    percent = 55;
+    label = "running";
+  } else if (state === "done") {
+    percent = 100;
+    label = "done";
+  } else if (state === "error") {
+    percent = 100;
+    label = "error";
+  }
+  if (typeof percentOverride === "number") {
+    percent = percentOverride;
+  }
+  if (bar) {
+    bar.style.width = `${percent}%`;
+    bar.classList.toggle("is-running", state === "running");
+  }
+  if (status) {
+    status.textContent = label;
+  }
+  if (caption) {
+    if (captionText) {
+      caption.textContent = captionText;
+    } else if (state === "idle") {
+      caption.textContent = "Waiting for a new run to start.";
+    } else if (state === "done") {
+      caption.textContent = "";
+    } else {
+      caption.textContent = "Working on the current step.";
+    }
+  }
+  if (card) {
+    card.dataset.state = state === "error" ? "error" : "";
+  }
+}
+
+function resetBotProgress() {
+  Object.keys(botProgress).forEach((key) =>
+    setBotProgress(key, "idle", 0, "Waiting for a new run to start.")
+  );
+}
+
+function setAccountDependentVisibility() {
+  if (!accountSelect || !accountDependent) return;
+  const hasAccount = Boolean(accountSelect.value);
+  accountDependent.style.display = hasAccount ? "block" : "none";
+  if (runBtn) {
+    runBtn.disabled = !hasAccount;
+  }
+  if (addTravelPartnerBtn) {
+    addTravelPartnerBtn.disabled = !hasAccount || travelPartners.length >= 2;
+  }
+  if (!hasAccount) {
+    selectedTravellers = [];
+    accountTravellers = [];
+    renderTravellerList();
+    closeTravelPartnersModal();
+  }
+  updateTravelPartnersCount();
+}
+
+async function loadAccounts() {
+  if (!accountSelect) return;
+  try {
+    const res = await fetch("/api/accounts");
+    const data = await res.json();
+    const accounts = data.accounts || [];
+    accountById.clear();
+    accountSelect.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select account";
+    accountSelect.appendChild(placeholder);
+    accounts.forEach((account) => {
+      const opt = document.createElement("option");
+      opt.value = account.id;
+      opt.textContent = account.employee_name;
+      accountSelect.appendChild(opt);
+      accountById.set(Number(account.id), account);
+    });
+  } catch (err) {
+    accountSelect.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Accounts unavailable";
+    accountSelect.appendChild(opt);
+    appendLog("Could not load accounts: " + err.message);
+  }
+  setAccountDependentVisibility();
+}
+
+function updateProgressFromLog(message) {
+  const match = message.match(/\[(myidtravel|google_flights|stafftraveler)\]/i);
+  if (!match) return;
+  const botKey = match[1].toLowerCase();
+  if (message.toLowerCase().includes("starting")) {
+    setBotProgress(botKey, "running");
+    return;
+  }
+  if (message.toLowerCase().includes("error")) {
+    setBotProgress(botKey, "error");
+    return;
+  }
+  if (message.toLowerCase().includes("finished") || message.toLowerCase().includes("completed")) {
+    setBotProgress(botKey, "done");
+  }
 }
 
 function showToast(message, type = "error") {
@@ -151,6 +261,144 @@ function showToast(message, type = "error") {
   }
 }
 
+function openTravelPartnersModal() {
+  if (!travelPartnersModal) return;
+  travelPartnersModal.classList.add("is-open");
+  travelPartnersModal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  if (travelPartnersSection) {
+    travelPartnersSection.style.display = "block";
+  }
+  if (travellerList) {
+    travellerList.style.display = "grid";
+  }
+}
+
+function closeTravelPartnersModal() {
+  if (!travelPartnersModal) return;
+  travelPartnersModal.classList.remove("is-open");
+  travelPartnersModal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function updateTravelPartnersCount() {
+  if (!travelPartnersCount) return;
+  const base = accountSelect?.value ? 1 : 0;
+  travelPartnersCount.textContent = String(
+    base + travelPartners.length + selectedTravellers.length
+  );
+}
+
+function cleanTravellerBirthday(value) {
+  if (!value) return "Not provided";
+  return String(value).replace(/\s*\([^)]*\)\s*/g, "").trim() || "Not provided";
+}
+
+function getTravellerKey(traveller, idx) {
+  const name = traveller?.name || traveller?.full_name || "";
+  const birthday = traveller?.birthday || traveller?.dob || "";
+  const relationship = traveller?.relationship || "";
+  return `${idx}-${name}-${birthday}-${relationship}`;
+}
+
+function renderTravellerList() {
+  if (!travellerList) return;
+  travellerList.innerHTML = "";
+  if (!accountTravellers.length) {
+    travellerList.innerHTML = '<div class="leg-subtitle">No travellers found for this account.</div>';
+    updateTravelPartnersCount();
+    return;
+  }
+  accountTravellers.forEach((traveller, idx) => {
+    const key = getTravellerKey(traveller, idx);
+    const name = traveller?.name || traveller?.full_name || "Unnamed traveller";
+    const birthday = cleanTravellerBirthday(traveller?.birthday || traveller?.dob);
+    const relationship = traveller?.relationship || "Relationship not provided";
+    const current = selectedTravellers.find((item) => item.key === key);
+
+    const row = document.createElement("div");
+    row.className = "traveller-item";
+
+    const checkWrap = document.createElement("label");
+    checkWrap.style.display = "flex";
+    checkWrap.style.alignItems = "center";
+    checkWrap.style.gap = "10px";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(current);
+    checkWrap.appendChild(checkbox);
+
+    const meta = document.createElement("div");
+    meta.className = "traveller-meta";
+    const title = document.createElement("div");
+    title.className = "traveller-name";
+    title.textContent = name;
+    const detail = document.createElement("div");
+    detail.className = "traveller-details";
+    detail.textContent = `Birthday: ${birthday} · Relationship: ${relationship}`;
+    meta.appendChild(title);
+    meta.appendChild(detail);
+
+    const actions = document.createElement("div");
+    actions.className = "traveller-actions";
+    const select = document.createElement("select");
+    ["", "MR", "MS"].forEach((opt) => {
+      const option = document.createElement("option");
+      option.value = opt;
+      option.textContent = opt ? opt : "Select";
+      select.appendChild(option);
+    });
+    select.value = current?.salutation || traveller?.salutation || "";
+    select.disabled = !current;
+    actions.appendChild(select);
+
+    checkbox.addEventListener("change", (event) => {
+      if (event.target.checked) {
+        if (selectedTravellers.length >= 8) {
+          showToast("You can select up to 8 travellers.");
+          checkbox.checked = false;
+          return;
+        }
+        selectedTravellers.push({
+          key,
+          name,
+          salutation: select.value || "",
+        });
+        select.disabled = false;
+      } else {
+        selectedTravellers = selectedTravellers.filter((item) => item.key !== key);
+        select.disabled = true;
+      }
+      updateTravelPartnersCount();
+    });
+
+    select.addEventListener("change", (event) => {
+      const entry = selectedTravellers.find((item) => item.key === key);
+      if (entry) {
+        entry.salutation = event.target.value;
+      }
+    });
+
+    row.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target instanceof HTMLSelectElement || target instanceof HTMLOptionElement) {
+        return;
+      }
+      if (target instanceof HTMLInputElement && target.type === "checkbox") {
+        return;
+      }
+      checkbox.checked = !checkbox.checked;
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    row.appendChild(checkWrap);
+    row.appendChild(meta);
+    row.appendChild(actions);
+    travellerList.appendChild(row);
+  });
+  updateTravelPartnersCount();
+}
+
 function validateInput(input) {
   const errors = [];
   if (!input || typeof input !== "object") {
@@ -159,12 +407,14 @@ function validateInput(input) {
   }
   const flightType = (input.flight_type || "").trim();
   const travelStatus = (input.travel_status || "").trim();
+  if (!input.account_id) errors.push("Account selection is required.");
   if (!flightType) errors.push("flight_type is required.");
   if (!travelStatus) errors.push("travel_status is required.");
 
   const trips = Array.isArray(input.trips) ? input.trips : [];
   const itinerary = Array.isArray(input.itinerary) ? input.itinerary : [];
   const partners = Array.isArray(input.travel_partner) ? input.travel_partner : [];
+  const travellers = Array.isArray(input.traveller) ? input.traveller : [];
 
   if (flightType === "one-way") {
     if (trips.length < 1) errors.push("one-way requires at least 1 trip.");
@@ -176,6 +426,8 @@ function validateInput(input) {
     if (trips.length < 1) errors.push("multiple-legs requires at least 1 trip.");
     if (itinerary.length < 1) errors.push("multiple-legs requires at least 1 itinerary entry.");
   }
+  if (travellers.length > 8) errors.push("You can select up to 8 travellers.");
+  if (partners.length > 2) errors.push("You can add up to 2 travel partners.");
 
   partners.forEach((partner, idx) => {
     const label = `Travel partner ${idx + 1}`;
@@ -207,23 +459,8 @@ function validateInput(input) {
 }
 
 function buildPayload() {
-  const useJson = inputSourceJson?.checked;
-  const raw = rawJson.value.trim();
-  if (useJson) {
-    if (!raw) {
-      throw new Error("Raw JSON is required when JSON input is selected.");
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      return {
-        input: parsed,
-        headed: document.getElementById("headed")?.checked || false,
-      };
-    } catch (err) {
-      throw new Error("Invalid JSON: " + err.message);
-    }
-  }
   const flightType = flightTypeSelect.value;
+  const accountId = accountSelect?.value?.trim() || "";
   const trips = legs.map((leg) => ({
     origin: (leg.origin || "").trim(),
     destination: (leg.destination || "").trim(),
@@ -243,12 +480,18 @@ function buildPayload() {
     }
   }
   const input = {
+    account_id: accountId ? Number(accountId) : null,
     flight_type: flightType,
     trips,
     itinerary,
     airline: airlineSelect.value,
     travel_status: travelStatusSelect.value,
     nonstop_flights: document.getElementById("nonstop_flights").checked,
+    traveller: selectedTravellers.map((traveller) => ({
+      name: traveller.name,
+      salutation: traveller.salutation || "",
+      checked: true,
+    })),
     travel_partner: travelPartners.map((p) => ({
       type: p.type,
       salutation: p.type === "Adult" ? p.salutation : undefined,
@@ -259,17 +502,6 @@ function buildPayload() {
     })),
   };
   return { input, headed: document.getElementById("headed").checked };
-}
-
-function setInputMode() {
-  const useJson = inputSourceJson?.checked;
-  if (useJson) {
-    formInputSection.style.display = 'none';
-    jsonInputSection.style.display = 'block';
-  } else {
-    formInputSection.style.display = 'block';
-    jsonInputSection.style.display = 'none';
-  }
 }
 
 function buildFindFlightPayload() {
@@ -406,11 +638,16 @@ function renderFindFlightCard(data, title, isStaff) {
 
 async function startRun(event) {
   event.preventDefault();
-  logFeed.innerHTML = "";
-  resultsBlock.textContent = "Running...";
-  fileList.innerHTML = "";
+  if (logFeed) {
+    logFeed.innerHTML = "";
+  }
+  if (resultsBlock) {
+    resultsBlock.textContent = "Running...";
+  }
+  if (fileList) {
+    fileList.innerHTML = "";
+  }
   setStatus("pending", "running");
-  downloadJsonBtn.disabled = true;
   downloadXlsxBtn.disabled = true;
 
   let payload;
@@ -439,6 +676,7 @@ async function startRun(event) {
   const data = await res.json();
   currentRunId = data.run_id;
   runIdEl.textContent = currentRunId ? `Run ${currentRunId}` : "";
+  resetBotProgress();
   appendLog(`Run started (${currentRunId})`);
   connectWebSocket(currentRunId);
 }
@@ -487,10 +725,40 @@ function connectWebSocket(runId) {
   ws.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     if (payload.type === "log") {
+      if (payload.message) {
+        updateProgressFromLog(payload.message);
+      }
       appendLog(`${payload.ts || ""} ${payload.message}`);
+    } else if (payload.type === "progress") {
+      const botKey = payload.bot;
+      const percent = Number(payload.percent || 0);
+      const stepKey = payload.status || "running";
+      const state =
+        stepKey === "done" ? "done" : stepKey === "error" ? "error" : "running";
+      const captions = {
+        launching: "Launching the browser and preparing the session.",
+        loaded: "Page loaded successfully. Preparing to fill the form.",
+        "form filled": "Form inputs completed. Getting ready to submit the search.",
+        submitted: "Search submitted. Waiting for results to load.",
+        "results loaded": "Results are loaded. Extracting flight details.",
+        parsed: "Parsing results into a structured response.",
+        screenshot: "Capturing the final screenshot for this bot.",
+        done: "Finished successfully and ready for review.",
+        error: "Stopped due to an error. Check logs for details.",
+        running: "Working on the current step.",
+        starting: "Starting the bot workflow.",
+      };
+      const captionText = captions[stepKey] || "Working on the current step.";
+      setBotProgress(botKey, state, percent, captionText);
     } else if (payload.type === "status") {
       if (payload.status === "completed") {
         setStatus("completed", "done");
+        Object.keys(botProgress).forEach((key) => {
+          const current = botProgress[key]?.status?.textContent;
+          if (current && current !== "done") {
+            setBotProgress(key, "done");
+          }
+        });
         fetchResults(runId);
       } else if (payload.status === "error") {
         setStatus("error", "error");
@@ -508,17 +776,17 @@ async function fetchResults(runId) {
   try {
     const res = await fetch(`/api/runs/${runId}`);
     const data = await res.json();
-    buildReportTabs(data.report);
-    fileList.innerHTML = "";
-    if (data.files) {
-      Object.entries(data.files).forEach(([name, path]) => {
-        const chip = document.createElement("span");
-        chip.className = "chip";
-        chip.textContent = `${name}: ${path}`;
-        fileList.appendChild(chip);
-      });
+    if (fileList) {
+      fileList.innerHTML = "";
+      if (data.files) {
+        Object.entries(data.files).forEach(([name, path]) => {
+          const chip = document.createElement("span");
+          chip.className = "chip";
+          chip.textContent = `${name}: ${path}`;
+          fileList.appendChild(chip);
+        });
+      }
     }
-    downloadJsonBtn.disabled = false;
     downloadXlsxBtn.disabled = false;
   } catch (err) {
     appendLog("Failed to load results: " + err.message);
@@ -536,7 +804,7 @@ async function download(kind) {
   const blob = await res.blob();
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `${currentRunId}.${kind === "excel" ? "xlsx" : "json"}`;
+  link.download = `${currentRunId}.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -608,8 +876,9 @@ function renderLegs() {
 function renderTravelPartners() {
   if (!travelPartnersContainer) return;
   travelPartnersContainer.innerHTML = "";
-  if (travelPartnersCount) {
-    travelPartnersCount.textContent = String(travelPartners.length);
+  updateTravelPartnersCount();
+  if (addTravelPartnerBtn) {
+    addTravelPartnerBtn.disabled = travelPartners.length >= 2;
   }
   travelPartners.forEach((partner, idx) => {
     const card = document.createElement("div");
@@ -948,53 +1217,75 @@ async function loadAirlines() {
   }
 }
 
-loadSampleBtn.addEventListener("click", () => {
-  rawJson.value = JSON.stringify(sampleInput, null, 2);
-});
-
-loadFileBtn.addEventListener("click", () => fileInput.click());
-
-fileInput.addEventListener("change", (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (evt) => {
-    rawJson.value = evt.target.result;
-  };
-  reader.readAsText(file);
-});
-
-downloadJsonBtn.addEventListener("click", () => download("json"));
 downloadXlsxBtn.addEventListener("click", () => download("excel"));
 form.addEventListener("submit", startRun);
 findFlightForm?.addEventListener("submit", startFindFlight);
 document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
 flightTypeSelect.addEventListener("change", ensureLegsMatchType);
-inputSourceForm?.addEventListener("change", setInputMode);
-inputSourceJson?.addEventListener("change", setInputMode);
+accountSelect?.addEventListener("change", setAccountDependentVisibility);
+accountSelect?.addEventListener("change", () => {
+  const accountId = Number(accountSelect?.value || 0);
+  const account = accountById.get(accountId);
+  accountTravellers = Array.isArray(account?.travellers) ? account.travellers : [];
+  selectedTravellers = [];
+  if (toggleTravellersBtn) {
+    toggleTravellersBtn.textContent = " + ";
+  }
+  if (travellerList) {
+    travellerList.style.display = "none";
+  }
+  renderTravellerList();
+});
 addFlightBtn.addEventListener("click", () => {
   if (flightTypeSelect.value !== "multiple-legs") return;
   legs.push(createLeg());
   renderLegs();
 });
 toggleTravelPartnersBtn?.addEventListener("click", () => {
-  if (!travelPartnersSection) return;
-  const isHidden = travelPartnersSection.style.display === "none";
-  travelPartnersSection.style.display = isHidden ? "block" : "none";
-  if (toggleTravelPartnersBtn) {
-    toggleTravelPartnersBtn.textContent = isHidden ? "Hide" : "Show";
+  if (!accountSelect?.value) {
+    showToast("Select an account first.");
+    return;
   }
+  openTravelPartnersModal();
 });
 addTravelPartnerBtn?.addEventListener("click", () => {
+  if (travelPartners.length >= 2) {
+    showToast("You can add up to 2 travel partners.");
+    return;
+  }
   travelPartners.push(createPartner());
   renderTravelPartners();
 });
+toggleTravellersBtn?.addEventListener("click", () => {
+  if (!travellerList) return;
+  const isHidden = travellerList.style.display === "none";
+  travellerList.style.display = isHidden ? "grid" : "none";
+  if (toggleTravellersBtn) {
+    toggleTravellersBtn.textContent = " + ";
+  }
+});
+if (travelPartnersModal && modalCloseButtons.length) {
+  modalCloseButtons.forEach((btn) => {
+    btn.addEventListener("click", closeTravelPartnersModal);
+  });
+  travelPartnersModal.addEventListener("click", (event) => {
+    if (event.target === travelPartnersModal) {
+      closeTravelPartnersModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && travelPartnersModal.classList.contains("is-open")) {
+      closeTravelPartnersModal();
+    }
+  });
+}
 
 ensureLegsMatchType();
 renderLegs();
 renderTravelPartners();
+renderTravellerList();
 loadAirlines();
-setInputMode();
+loadAccounts();
 const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 if (headedToggle && !isDevHost) {
   headedToggle.style.display = "none";
@@ -1010,4 +1301,4 @@ if (findFlightToggle && findFlightContent && defaultContent) {
     findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
   });
 }
-appendLog("Ready. Fill the form or drop a JSON payload.");
+appendLog("Ready. Fill the form to run the bots.");

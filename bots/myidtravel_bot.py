@@ -73,9 +73,12 @@ async def perform_login(
     context,
     headless: bool,
     screenshot: str | None,
+    username: str | None = None,
+    password: str | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ):
-    username = os.getenv("UAL_USERNAME")
-    password = os.getenv("UAL_PASSWORD")
+    username = username or os.getenv("UAL_USERNAME")
+    password = password or os.getenv("UAL_PASSWORD")
 
     if not username or not password:
         await _notify_message("MyIDTravel: no Username/Password found.")
@@ -83,6 +86,8 @@ async def perform_login(
 
     page = await context.new_page()
     await page.goto(config.LOGIN_URL, wait_until="domcontentloaded")
+    if progress_cb:
+        await progress_cb(15, "loaded")
     await page.fill("#username", username)
     await page.wait_for_timeout(500)
     await page.fill("#password", password)
@@ -676,7 +681,11 @@ async def click_traveller_continue(page) -> None:
             pass
 
 
-async def submit_form_and_capture(page, output_path: Path | None = None) -> Any | None:
+async def submit_form_and_capture(
+    page,
+    output_path: Path | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
+) -> Any | None:
     loop = asyncio.get_event_loop()
     flightschedule_future: asyncio.Future = loop.create_future()
 
@@ -692,6 +701,8 @@ async def submit_form_and_capture(page, output_path: Path | None = None) -> Any 
 
     submit_btn = page.locator(config.SUBMIT_SELECTOR).first
     await submit_btn.click()
+    if progress_cb:
+        await progress_cb(50, "submitted")
 
     try:
         response = await asyncio.wait_for(flightschedule_future, timeout=20000)
@@ -703,17 +714,42 @@ async def submit_form_and_capture(page, output_path: Path | None = None) -> Any 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data))
             logger.info("Saved flightschedule response to %s", output_path)
+        if progress_cb:
+            await progress_cb(85, "parsed")
         if isinstance(data, dict):
             routings = data.get("routings", [])
-            has_flights = any(
-                isinstance(routing, dict) and routing.get("flights")
-                for routing in routings
-            )
+            filtered_routings: list[dict[str, Any]] = []
+            for routing in routings:
+                if not isinstance(routing, dict):
+                    continue
+                flights = routing.get("flights", [])
+                if not isinstance(flights, list):
+                    flights = []
+                selectable_flights = [
+                    flight for flight in flights if isinstance(flight, dict) and flight.get("selectable") is True
+                ]
+                trimmed = dict(routing)
+                trimmed["flights"] = selectable_flights
+                filtered_routings.append(trimmed)
+            has_flights = any(routing.get("flights") for routing in filtered_routings)
             if not has_flights:
-                await _notify_message("MyIDTravel: no results available for the search.")
-            return routings
+                await _notify_message("MyIDTravel: no selectable flights found for the search.")
+            return filtered_routings
         if isinstance(data, list):
-            return data
+            filtered_routings = []
+            for routing in data:
+                if not isinstance(routing, dict):
+                    continue
+                flights = routing.get("flights", [])
+                if not isinstance(flights, list):
+                    flights = []
+                selectable_flights = [
+                    flight for flight in flights if isinstance(flight, dict) and flight.get("selectable") is True
+                ]
+                trimmed = dict(routing)
+                trimmed["flights"] = selectable_flights
+                filtered_routings.append(trimmed)
+            return filtered_routings
     except asyncio.TimeoutError:
         logger.warning("Timed out waiting for flightschedule response; no JSON saved.")
         await _notify_message("MyIDTravel: Timed out waiting for flight schedule response; no JSON saved.")
@@ -723,7 +759,12 @@ async def submit_form_and_capture(page, output_path: Path | None = None) -> Any 
     return None
 
 
-async def fill_form_from_input(page, input_data: Dict[str, Any], output_path: Path | None = None) -> Any | None:
+async def fill_form_from_input(
+    page,
+    input_data: Dict[str, Any],
+    output_path: Path | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
+) -> Any | None:
     logger.info("Successful login; filling form")
 
     try:
@@ -815,9 +856,11 @@ async def fill_form_from_input(page, input_data: Dict[str, Any], output_path: Pa
             )
 
     await page.wait_for_timeout(500)
+    if progress_cb:
+        await progress_cb(35, "form filled")
 
     # Save under a consistent flightschedule filename (independent of flight_type input).
-    return await submit_form_and_capture(page, output_path)
+    return await submit_form_and_capture(page, output_path, progress_cb=progress_cb)
 
     await page.wait_for_timeout(1000)
 
@@ -829,25 +872,41 @@ async def run(
     final_screenshot: str | None = None,
     input_data: dict[str, Any] | None = None,
     output_path: Path | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> Any | None:
     resolved_input = input_data or read_input(input_path or "input.json")
 
     async with async_playwright() as p:
+        if progress_cb:
+            await progress_cb(5, "launching")
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
 
-        page = await perform_login(context, headless=headless, screenshot=screenshot)
-        data = await fill_form_from_input(page, resolved_input, output_path=output_path)
+        page = await perform_login(
+            context,
+            headless=headless,
+            screenshot=screenshot,
+            username=username,
+            password=password,
+            progress_cb=progress_cb,
+        )
+        data = await fill_form_from_input(page, resolved_input, output_path=output_path, progress_cb=progress_cb)
 
         if final_screenshot:
             try:
                 screenshot_path = Path(final_screenshot)
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(screenshot_path), full_page=True)
+                if progress_cb:
+                    await progress_cb(95, "screenshot")
             except Exception:
                 pass
 
         await browser.close()
+        if progress_cb:
+            await progress_cb(100, "done")
         return data
     return None
 

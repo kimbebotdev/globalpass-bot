@@ -29,7 +29,16 @@ load_dotenv(BASE_DIR / ".env", override=True, interpolate=False)
 
 import config
 from bots import google_flights_bot, google_flights_bot_2, myidtravel_bot, stafftraveler_bot, stafftraveler_bot_2
-from db import create_run_record, ensure_data_dir, save_lookup_response, save_standby_response, update_run_record
+from db import (
+    create_run_record,
+    ensure_data_dir,
+    get_account_options,
+    get_myidtravel_account,
+    get_stafftraveler_account_by_employee_name,
+    save_lookup_response,
+    save_standby_response,
+    update_run_record,
+)
 
 logger = logging.getLogger("globalpass")
 if not logging.getLogger().handlers:
@@ -286,6 +295,9 @@ class RunState:
         self.subscribers: dict[WebSocket, asyncio.Queue] = {}
         self.done = asyncio.Event()
         self.result_files: dict[str, Path] = {}
+        self.myidtravel_credentials: dict[str, str] | None = None
+        self.stafftraveler_credentials: dict[str, str] | None = None
+        self.employee_name: str | None = None
 
         # Slack-specific fields
         self.slack_channel: str | None = None
@@ -310,6 +322,16 @@ class RunState:
                 stale.append(ws)
         for ws in stale:
             self.unsubscribe(ws)
+
+    async def progress(self, bot: str, percent: int, status: str | None = None) -> None:
+        payload = {
+            "type": "progress",
+            "bot": bot,
+            "percent": max(0, min(100, percent)),
+        }
+        if status:
+            payload["status"] = status
+        await self._broadcast(payload, store=False)
 
     async def log(self, message: str) -> None:
         payload = {
@@ -905,8 +927,17 @@ async def run_myidtravel(state: RunState, headed: bool) -> dict[str, Any]:
         notify = _notify
 
     try:
+        if not state.myidtravel_credentials:
+            await state.log("[myidtravel] error: missing account credentials.")
+            return {
+                "name": "myidtravel",
+                "status": "error",
+                "error": "missing myidtravel credentials",
+                "payload": None,
+            }
         myidtravel_bot.set_notifier(notify)
         try:
+            await state.progress("myidtravel", 40, "running")
             payload = await myidtravel_bot.run(
                 headless=not headed,
                 screenshot=None,
@@ -914,6 +945,9 @@ async def run_myidtravel(state: RunState, headed: bool) -> dict[str, Any]:
                 final_screenshot=str(state.output_dir / "myidtravel_final.png"),
                 input_data=state.input_data,
                 output_path=None,
+                username=state.myidtravel_credentials.get("username"),
+                password=state.myidtravel_credentials.get("password"),
+                progress_cb=lambda percent, status: state.progress("myidtravel", percent, status),
             )
         finally:
             myidtravel_bot.set_notifier(None)
@@ -950,6 +984,7 @@ async def run_google_flights(state: RunState, limit: int, headed: bool) -> dict[
     try:
         google_flights_bot.set_notifier(notify)
         try:
+            await state.progress("google_flights", 40, "running")
             payload = await google_flights_bot.run(
                 headless=not headed,
                 input_path=None,
@@ -957,6 +992,7 @@ async def run_google_flights(state: RunState, limit: int, headed: bool) -> dict[
                 limit=limit,
                 screenshot=str(state.output_dir / "google_flights_final.png"),
                 input_data=state.input_data,
+                progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
             )
         finally:
             google_flights_bot.set_notifier(None)
@@ -992,13 +1028,25 @@ async def run_stafftraveler(state: RunState, headed: bool) -> dict[str, Any]:
 
         notify = _notify
     try:
+        if not state.stafftraveler_credentials:
+            await state.log("[stafftraveler] skipped: no account credentials available.")
+            return {
+                "name": "stafftraveler",
+                "status": "skipped",
+                "error": "missing stafftraveler credentials",
+                "payload": None,
+            }
         stafftraveler_bot.set_notifier(notify)
         try:
+            await state.progress("stafftraveler", 40, "running")
             payload = await stafftraveler_bot.perform_stafftraveller_login(
                 headless=not headed,
                 screenshot=str(state.output_dir / "stafftraveler_final.png"),
                 input_data=state.input_data,
                 output_path=None,
+                username=state.stafftraveler_credentials.get("username"),
+                password=state.stafftraveler_credentials.get("password"),
+                progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
             )
         finally:
             stafftraveler_bot.set_notifier(None)
@@ -1038,6 +1086,67 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
             state.done.set()
             return
         state.input_data = normalized_input
+
+        raw_account_id = state.input_data.get("account_id")
+        if not raw_account_id:
+            message = "Run blocked: account_id is required to load MyIDTravel credentials."
+            await _notify_thread_message(state, message)
+            await state.log(message)
+            state.status = "error"
+            state.error = "missing account_id"
+            state.completed_at = datetime.utcnow()
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
+            await state.push_status()
+            state.done.set()
+            return
+
+        try:
+            account_id = int(raw_account_id)
+        except (TypeError, ValueError):
+            message = f"Run blocked: account_id '{raw_account_id}' is invalid."
+            await _notify_thread_message(state, message)
+            await state.log(message)
+            state.status = "error"
+            state.error = "invalid account_id"
+            state.completed_at = datetime.utcnow()
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
+            await state.push_status()
+            state.done.set()
+            return
+
+        myid_account = get_myidtravel_account(account_id)
+        if not myid_account or not myid_account.username or not myid_account.password:
+            message = f"MyIDTravel credentials missing for account_id={account_id}. Run stopped."
+            await _notify_thread_message(state, message)
+            await state.log(message)
+            state.status = "error"
+            state.error = "missing myidtravel credentials"
+            state.completed_at = datetime.utcnow()
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
+            await state.push_status()
+            state.done.set()
+            return
+
+        state.employee_name = myid_account.employee_name
+        state.myidtravel_credentials = {
+            "username": myid_account.username,
+            "password": myid_account.password,
+        }
+
+        staff_account = get_stafftraveler_account_by_employee_name(myid_account.employee_name)
+        if not staff_account or not staff_account.username or not staff_account.password:
+            message = (
+                f"StaffTraveler account not found for employee '{myid_account.employee_name}'. "
+                "Skipping StaffTraveler for this run."
+            )
+            await _notify_thread_message(state, message)
+            await state.log(message)
+            state.stafftraveler_credentials = None
+        else:
+            state.stafftraveler_credentials = {
+                "username": staff_account.username,
+                "password": staff_account.password,
+            }
 
         await state.log("Run started; launching three bots concurrently.")
         logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
@@ -1839,6 +1948,11 @@ async def shutdown_event():
     """Stop Slack bot on application shutdown"""
     await stop_slack_bot()
     logger.info("FastAPI application stopped")
+
+
+@app.get("/api/accounts")
+async def account_options():
+    return {"accounts": get_account_options()}
 
 
 @app.get("/api/slack/status")

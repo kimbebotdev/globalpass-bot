@@ -1234,6 +1234,7 @@ async def run(
     limit: int,
     screenshot: str | None,
     input_data: dict[str, Any] | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
     logger.info(
         "Starting Google Flights run headless=%s input=%s limit=%s",
@@ -1249,6 +1250,8 @@ async def run(
     results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
+        if progress_cb:
+            await progress_cb(5, "launching")
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
         page = await context.new_page()
@@ -1256,6 +1259,8 @@ async def run(
         # Open flights home
         await page.goto("https://www.google.com/travel/flights")
         await _handle_cookie_banner(page)
+        if progress_cb:
+            await progress_cb(15, "loaded")
 
         # Set trip type, passengers, seat class
         await _switch_trip_type(page, flight_type)
@@ -1269,6 +1274,8 @@ async def run(
             flight_type,
             seat_class or "default",
         )
+        if progress_cb:
+            await progress_cb(35, "form filled")
 
         if flight_type == "multiple-legs" and len(legs) > 1:
             logger.info("Filling %s multi-city legs", len(legs))
@@ -1303,6 +1310,8 @@ async def run(
                 await search_btn.click()
             except Exception:
                 pass
+        if progress_cb:
+            await progress_cb(50, "submitted")
 
         try:
             await page.wait_for_load_state("networkidle", timeout=12000)
@@ -1323,6 +1332,8 @@ async def run(
 
         flight_number = (resolved_input.get("flight_number") or "").replace(" ", "").upper()
         flights = await _scrape_results(page, limit=limit, flight_number=flight_number or None)
+        if progress_cb:
+            await progress_cb(85, "parsed")
         logger.info(
             "Scraped flights: top=%s",
             len(flights.get("top_flights", [])),
@@ -1343,6 +1354,8 @@ async def run(
                 screenshot_path = Path(screenshot)
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(screenshot_path), full_page=True)
+                if progress_cb:
+                    await progress_cb(95, "screenshot")
             except Exception:
                 pass
 
@@ -1353,6 +1366,8 @@ async def run(
         output.write_text(json.dumps(results, indent=2))
         logger.info("Wrote %s leg result(s) to %s", len(results), output)
 
+    if progress_cb:
+        await progress_cb(100, "done")
     return results
 
 

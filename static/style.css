@@ -568,11 +568,202 @@ button:disabled {
   flex-wrap: wrap;
 }
 
-.json-actions {
+.bot-progress {
   display: flex;
+  flex-direction: column;
   gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 12px;
+}
+
+.bot-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bot-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bot-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bot-icon img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  display: block;
+  border-radius: 50%;
+}
+
+.bot-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bot-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.bot-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.bot-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.compact-header {
+  margin-top: 0;
+  padding-bottom: 12px;
+}
+
+.traveller-selector {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.traveller-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(5 * var(--traveller-row-height, 72px) + 4 * 10px);
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.traveller-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  background: var(--bg-secondary);
+  min-height: var(--traveller-row-height, 72px);
+}
+
+.traveller-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.traveller-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.traveller-details {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.traveller-actions select {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  padding: 0 8px;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+
+.modal.is-open {
+  display: flex;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.22);
+  backdrop-filter: blur(2px);
+}
+
+.modal-content {
+  position: relative;
+  z-index: 1;
+  width: min(880px, 92vw);
+  max-height: 88vh;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  padding: 18px 20px 24px;
+  overflow-y: auto;
+}
+
+.modal-body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.modal-body::-webkit-scrollbar-track {
+  background: rgba(148, 163, 184, 0.15);
+  border-radius: 10px;
+}
+
+.modal-body::-webkit-scrollbar-thumb {
+  background: rgba(59, 130, 246, 0.45);
+  border-radius: 10px;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.bot-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--success) 100%);
+  transition: width 0.4s ease;
+}
+
+.bot-card[data-state="error"] .bot-bar-fill {
+  background: linear-gradient(90deg, var(--danger) 0%, #f97316 100%);
 }
 
 /* Legs Section */
@@ -590,6 +781,12 @@ button:disabled {
   font-size: 16px;
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.leg-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .leg-subtitle {

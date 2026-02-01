@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,21 @@ class AccountExporter:
             return []
         return [item.strip() for item in str(value).split("\n") if item.strip()]
 
+    def clean_traveller_name(self, name: str | None) -> str | None:
+        if not name:
+            return name
+        cleaned = re.sub(r"\[[^\]]*]", "", name)
+        cleaned = re.sub(r"\([^)]*\)", "", cleaned)
+        cleaned = re.sub(r"\([^)]*$", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or None
+
     def map_travellers(self, names_str: Any, dobs_str: Any, relationship_type: str) -> list[dict[str, Any]]:
         names = self.clean_and_split(names_str)
         dobs = self.clean_and_split(dobs_str)
         result: list[dict[str, Any]] = []
         for idx in range(max(len(names), len(dobs))):
-            name = names[idx] if idx < len(names) else None
+            name = self.clean_traveller_name(names[idx] if idx < len(names) else None)
             dob = dobs[idx] if idx < len(dobs) else None
             if name or dob:
                 result.append(

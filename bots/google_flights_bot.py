@@ -4,11 +4,13 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any
 
-from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -16,7 +18,6 @@ if str(BASE_DIR) not in sys.path:
 
 import config
 from bots.myidtravel_bot import read_input
-
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
@@ -27,10 +28,10 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+_notify_callback: Callable[[str], Awaitable[None]] | None = None
 
 
-def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+def set_notifier(callback: Callable[[str], Awaitable[None]] | None) -> None:
     global _notify_callback
     _notify_callback = callback
 
@@ -43,7 +44,7 @@ async def _notify_message(message: str) -> None:
             pass
 
 
-def _parse_date(date_str: str) -> Optional[datetime]:
+def _parse_date(date_str: str) -> datetime | None:
     """
     Try to parse a date string in common formats used by input.json.
     """
@@ -60,7 +61,7 @@ def _iso_date(date_str: str) -> str:
     return dt.strftime("%Y-%m-%d") if dt else date_str
 
 
-def build_legs(input_data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], str]:
+def build_legs(input_data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     """
     Normalize the input.json format into legs suitable for Google Flights form.
     """
@@ -71,7 +72,7 @@ def build_legs(input_data: Dict[str, Any]) -> tuple[List[Dict[str, Any]], str]:
     if not trips:
         raise SystemExit("Input must include at least one trip.")
 
-    legs: List[Dict[str, Any]] = []
+    legs: list[dict[str, Any]] = []
 
     if flight_type == "one-way":
         leg_data = itinerary[0] if itinerary else {}
@@ -195,8 +196,8 @@ def _extract_stops(text: str) -> str:
     return ""
 
 
-async def _scrape_section(listitems, limit: int) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
+async def _scrape_section(listitems, limit: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
     if not listitems:
         return results
     count = min(await listitems.count(), limit)
@@ -238,11 +239,11 @@ async def _scrape_section(listitems, limit: int) -> List[Dict[str, Any]]:
     return results
 
 
-async def _scrape_section(items, limit: int) -> List[Dict[str, Any]]:
+async def _scrape_section(items, limit: int) -> list[dict[str, Any]]:
     """
     Scrape flight information from a list of flight card items.
     """
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     count = min(await items.count(), limit)
 
     for idx in range(count):
@@ -258,7 +259,7 @@ async def _scrape_section(items, limit: int) -> List[Dict[str, Any]]:
     return results
 
 
-async def _extract_flight_data(card) -> Dict[str, Any]:
+async def _extract_flight_data(card) -> dict[str, Any]:
     """
     Extract flight details from a single flight card element.
     Based on the structure in Sample LI.html
@@ -273,7 +274,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
         "origin": "",
         "destination": "",
         "emissions": "",
-        "summary": ""
+        "summary": "",
     }
 
     try:
@@ -286,7 +287,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract airline name
         # Look for airline name in the Ir0Voe div > sSHqwe span
-        airline_loc = card.locator('.Ir0Voe .sSHqwe').first
+        airline_loc = card.locator(".Ir0Voe .sSHqwe").first
         if await airline_loc.count():
             try:
                 flight_data["airline"] = (await airline_loc.inner_text()).strip()
@@ -295,7 +296,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # If airline not found, try alternate location
         if not flight_data["airline"]:
-            airline_alt = card.locator('.h1fkLb span').first
+            airline_alt = card.locator(".h1fkLb span").first
             if await airline_alt.count():
                 try:
                     flight_data["airline"] = (await airline_alt.inner_text()).strip()
@@ -303,10 +304,15 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract departure time
-        depart_time_loc = card.locator('.wtdjmc').first
+        depart_time_loc = card.locator(".wtdjmc").first
         if await depart_time_loc.count():
             try:
-                flight_data["depart_time"] = (await depart_time_loc.get_attribute("aria-label") or "").replace("Departure time: ", "").replace(".", "").strip()
+                flight_data["depart_time"] = (
+                    (await depart_time_loc.get_attribute("aria-label") or "")
+                    .replace("Departure time: ", "")
+                    .replace(".", "")
+                    .strip()
+                )
             except Exception:
                 try:
                     flight_data["depart_time"] = (await depart_time_loc.inner_text()).strip()
@@ -314,10 +320,15 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract arrival time
-        arrival_time_loc = card.locator('.XWcVob').first
+        arrival_time_loc = card.locator(".XWcVob").first
         if await arrival_time_loc.count():
             try:
-                flight_data["arrival_time"] = (await arrival_time_loc.get_attribute("aria-label") or "").replace("Arrival time: ", "").replace(".", "").strip()
+                flight_data["arrival_time"] = (
+                    (await arrival_time_loc.get_attribute("aria-label") or "")
+                    .replace("Arrival time: ", "")
+                    .replace(".", "")
+                    .strip()
+                )
             except Exception:
                 try:
                     flight_data["arrival_time"] = (await arrival_time_loc.inner_text()).strip()
@@ -325,7 +336,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                     pass
 
         # Extract origin airport code
-        origin_loc = card.locator('.G2WY5c').first
+        origin_loc = card.locator(".G2WY5c").first
         if await origin_loc.count():
             try:
                 flight_data["origin"] = (await origin_loc.inner_text()).strip()
@@ -333,7 +344,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract destination airport code
-        dest_loc = card.locator('.c8rWCd').first
+        dest_loc = card.locator(".c8rWCd").first
         if await dest_loc.count():
             try:
                 flight_data["destination"] = (await dest_loc.inner_text()).strip()
@@ -342,7 +353,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract duration and stops information
         # Duration is in aria-label format: "Total duration 13 hr 20 min"
-        duration_loc = card.locator('.gvkrdb').first
+        duration_loc = card.locator(".gvkrdb").first
         if await duration_loc.count():
             try:
                 duration_aria = await duration_loc.get_attribute("aria-label")
@@ -354,7 +365,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract stops information
-        stops_loc = card.locator('.EfT7Ae span').first
+        stops_loc = card.locator(".EfT7Ae span").first
         if await stops_loc.count():
             try:
                 stops_aria = await stops_loc.get_attribute("aria-label")
@@ -367,7 +378,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # If stops not found, try alternate location
         if not flight_data["stops"]:
-            stops_alt = card.locator('.VG3hNb').first
+            stops_alt = card.locator(".VG3hNb").first
             if await stops_alt.count():
                 try:
                     flight_data["stops"] = (await stops_alt.inner_text()).strip()
@@ -376,7 +387,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
 
         # Extract price
         # Price is in the YMlIz FpEdX jLMuyc span with aria-label
-        price_loc = card.locator('.YMlIz.FpEdX.jLMuyc span[aria-label]').first
+        price_loc = card.locator(".YMlIz.FpEdX.jLMuyc span[aria-label]").first
         if await price_loc.count():
             try:
                 price_aria = await price_loc.get_attribute("aria-label")
@@ -388,7 +399,7 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
                 pass
 
         # Extract emissions data
-        emissions_loc = card.locator('.AdWm1c.lc3qH').first
+        emissions_loc = card.locator(".AdWm1c.lc3qH").first
         if await emissions_loc.count():
             try:
                 flight_data["emissions"] = (await emissions_loc.inner_text()).strip()
@@ -401,14 +412,14 @@ async def _extract_flight_data(card) -> Dict[str, Any]:
     return flight_data
 
 
-async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any]]]:
+async def _scrape_results(page, limit: int = 30) -> dict[str, list[dict[str, Any]]]:
     """
     Scrape results grouped into top_flights and other_flights using the tabpanel
     inside the main results container. Falls back to a flat list under 'all' if
     sections are not found.
     """
-    top_flights: List[Dict[str, Any]] = []
-    other_flights: List[Dict[str, Any]] = []
+    top_flights: list[dict[str, Any]] = []
+    other_flights: list[dict[str, Any]] = []
 
     # Find visible tabpanel inside the main results container.
     main_panels = page.locator("div.FXkZv[role='main'] div.eQ35Ce div[role='tabpanel']")
@@ -468,7 +479,7 @@ async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any
             logger.info("Found %s other flights", await found_other.count())
             other_flights = await _scrape_section(found_other, limit)
 
-    all_flights: List[Dict[str, Any]] = []
+    all_flights: list[dict[str, Any]] = []
     if not top_flights and not other_flights:
         logger.info("No sections found, trying flat list scrape")
         selectors = [
@@ -492,7 +503,8 @@ async def _scrape_results(page, limit: int = 30) -> Dict[str, List[Dict[str, Any
 
     return {"top_flights": top_flights, "other_flights": other_flights, "all": all_flights}
 
-def _age_from_dob(dob_str: str) -> Optional[int]:
+
+def _age_from_dob(dob_str: str) -> int | None:
     if not dob_str:
         return None
     for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
@@ -506,7 +518,7 @@ def _age_from_dob(dob_str: str) -> Optional[int]:
     return None
 
 
-def _compute_passenger_clicks(input_data: Dict[str, Any]) -> Dict[str, int]:
+def _compute_passenger_clicks(input_data: dict[str, Any]) -> dict[str, int]:
     traveller = input_data.get("traveller") or []
     partners = input_data.get("travel_partner") or []
 
@@ -672,7 +684,9 @@ async def _fill_leg_row(page, idx: int, origin: str, destination: str, date_str:
             else:
                 candidate_rows = page.locator(config.GF_LEG_ROW)
             row_count = await candidate_rows.count()
-            logger.info(f"Strategy 1.{idx_container} (GF_LEG_ROW via container {idx_container}): found {row_count} rows")
+            logger.info(
+                f"Strategy 1.{idx_container} (GF_LEG_ROW via container {idx_container}): found {row_count} rows"
+            )
             if row_count > 0:
                 rows = candidate_rows
                 break
@@ -786,7 +800,7 @@ async def _fill_simple_field(locator, value: str) -> None:
         overlay_input = None
         try:
             # The focused element is usually the correct input
-            overlay_input = page_obj.locator(':focus').first
+            overlay_input = page_obj.locator(":focus").first
             if await overlay_input.count() > 0 and await overlay_input.is_visible():
                 logger.debug("Found focused input")
             else:
@@ -898,7 +912,7 @@ async def _fill_simple_field(locator, value: str) -> None:
             if not option:
                 try:
                     logger.debug("Trying text-based search for: %s", code)
-                    all_options = page_obj.locator(f'li[role="option"]:visible')
+                    all_options = page_obj.locator('li[role="option"]:visible')
                     count = await all_options.count()
                     logger.debug("Found %s visible options total", count)
 
@@ -949,6 +963,7 @@ async def _fill_simple_field(locator, value: str) -> None:
     except Exception as e:
         logger.error("Error filling field with value '%s': %s", value, e, exc_info=True)
 
+
 async def _fill_basic_form(
     page,
     origin: str,
@@ -969,9 +984,17 @@ async def _fill_basic_form(
     rows = fields_container.locator(config.GF_LEG_ROW)
     row = rows.first if await rows.count() else fields_container
 
-    from_field = row.locator(config.GF_FROM_INPUT).first if await row.locator(config.GF_FROM_INPUT).count() else page.locator(config.GF_FROM_INPUT).first
+    from_field = (
+        row.locator(config.GF_FROM_INPUT).first
+        if await row.locator(config.GF_FROM_INPUT).count()
+        else page.locator(config.GF_FROM_INPUT).first
+    )
 
-    to_field = row.locator(config.GF_TO_INPUT).first if await row.locator(config.GF_TO_INPUT).count() else page.locator(config.GF_TO_INPUT).first
+    to_field = (
+        row.locator(config.GF_TO_INPUT).first
+        if await row.locator(config.GF_TO_INPUT).count()
+        else page.locator(config.GF_TO_INPUT).first
+    )
 
     await _fill_simple_field(from_field, origin)
     logger.info("Filled origin: %s", origin)
@@ -1044,11 +1067,11 @@ async def _fill_basic_form(
 
 async def scrape_basic_form(
     page,
-    leg: Dict[str, Any],
+    leg: dict[str, Any],
     flight_type: str,
     nonstop_only: bool,
     limit: int,
-) -> Dict[str, Any] | None:
+) -> dict[str, Any] | None:
     try:
         await page.goto("https://www.google.com/travel/flights")
     except Exception:
@@ -1104,7 +1127,7 @@ async def scrape_basic_form(
     }
 
 
-async def _select_passengers(page, input_data: Dict[str, Any]) -> None:
+async def _select_passengers(page, input_data: dict[str, Any]) -> None:
     counts = _compute_passenger_clicks(input_data)
     form = page.locator(config.GF_FORM_CONTAINER).first
     if not await form.count():
@@ -1207,6 +1230,7 @@ async def run(
     limit: int,
     screenshot: str | None,
     input_data: dict[str, Any] | None = None,
+    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
     logger.info("Starting Google Flights run headless=%s input=%s limit=%s", headless, input_path, limit)
     resolved_input = input_data or read_input(input_path or "input.json")
@@ -1214,9 +1238,11 @@ async def run(
     logger.info("Prepared %s leg(s) for flight_type=%s", len(legs), flight_type)
     nonstop_only = bool(resolved_input.get("nonstop_flights"))
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
+        if progress_cb:
+            await progress_cb(5, "launching")
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
         page = await context.new_page()
@@ -1224,6 +1250,8 @@ async def run(
         # Open flights home
         await page.goto("https://www.google.com/travel/flights")
         await _handle_cookie_banner(page)
+        if progress_cb:
+            await progress_cb(15, "loaded")
 
         # Set trip type, passengers, seat class
         await _switch_trip_type(page, flight_type)
@@ -1233,6 +1261,8 @@ async def run(
             seat_class = resolved_input["itinerary"][0].get("class", "")
         await _select_seat_class(page, seat_class)
         logger.info("Configured trip type=%s passengers seat_class=%s", flight_type, seat_class or "default")
+        if progress_cb:
+            await progress_cb(35, "form filled")
 
         if flight_type == "multiple-legs" and len(legs) > 1:
             logger.info("Filling %s multi-city legs", len(legs))
@@ -1247,7 +1277,12 @@ async def run(
                 )
         else:
             leg = legs[0]
-            logger.info("Filling basic form for %s -> %s on %s", leg.get("origin"), leg.get("destination"), leg.get("depart_date"))
+            logger.info(
+                "Filling basic form for %s -> %s on %s",
+                leg.get("origin"),
+                leg.get("destination"),
+                leg.get("depart_date"),
+            )
             await _fill_basic_form(
                 page,
                 leg.get("origin", ""),
@@ -1262,6 +1297,8 @@ async def run(
                 await search_btn.click()
             except Exception:
                 pass
+        if progress_cb:
+            await progress_cb(50, "submitted")
 
         try:
             await page.wait_for_load_state("networkidle", timeout=12000)
@@ -1281,6 +1318,8 @@ async def run(
                 pass
 
         flights = await _scrape_results(page, limit=limit)
+        if progress_cb:
+            await progress_cb(85, "parsed")
         logger.info(
             "Scraped flights: top=%s other=%s all=%s",
             len(flights.get("top_flights", [])),
@@ -1303,6 +1342,8 @@ async def run(
                 screenshot_path = Path(screenshot)
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                 await page.screenshot(path=str(screenshot_path), full_page=True)
+                if progress_cb:
+                    await progress_cb(95, "screenshot")
             except Exception:
                 pass
 
@@ -1313,6 +1354,8 @@ async def run(
         output.write_text(json.dumps(results, indent=2))
         logger.info("Wrote %s leg result(s) to %s", len(results), output)
 
+    if progress_cb:
+        await progress_cb(100, "done")
     return results
 
 
