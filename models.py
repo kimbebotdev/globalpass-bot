@@ -30,7 +30,7 @@ class StandbyBotResponse(SQLModel, table=True):
     google_flights_payload: Any | None = Field(default=None, sa_column=Column(JSON))
     stafftraveler_payload: Any | None = Field(default=None, sa_column=Column(JSON))
     gemini_payload: Any | None = Field(default=None, sa_column=Column(JSON))
-    standby_bots_payload: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    standby_bots_payload: list[Any] | dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     output_paths: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     error: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)

@@ -6,7 +6,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
-from sqlmodel import Session, create_engine, select
+from sqlmodel import Session, col, create_engine, desc, select
 
 from models import LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
 
@@ -31,8 +31,6 @@ def ensure_data_dir() -> None:
             Path(url.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         logger.warning("Failed to ensure sqlite directory: %s", exc)
-
-
 
 
 def create_run_record(
@@ -93,7 +91,7 @@ def save_standby_response(
     google_flights_payload: Any | None,
     stafftraveler_payload: Any | None,
     gemini_payload: Any | None,
-    standby_bots_payload: dict[str, Any] | None,
+    standby_bots_payload: list[Any] | dict[str, Any] | None,
     error: str | None = None,
 ) -> None:
     try:
@@ -152,7 +150,7 @@ def get_account_options() -> list[dict[str, Any]]:
                 )
                 .join(
                     StafftravelerAccount,
-                    StafftravelerAccount.employee_name == MyidtravelAccount.employee_name,
+                    onclause=(col(StafftravelerAccount.employee_name) == col(MyidtravelAccount.employee_name)),
                 )
                 .order_by(MyidtravelAccount.employee_name)
             )
@@ -170,6 +168,20 @@ def get_account_options() -> list[dict[str, Any]]:
         return []
 
 
+def get_latest_standby_response(run_id: str) -> StandbyBotResponse | None:
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(StandbyBotResponse)
+                .where(StandbyBotResponse.run_id == run_id)
+                .order_by(desc(StandbyBotResponse.created_at))
+            )
+            return session.exec(statement).first()
+    except Exception as exc:
+        logger.warning("Failed to fetch standby response for %s: %s", run_id, exc)
+        return None
+
+
 def get_myidtravel_account(account_id: int) -> MyidtravelAccount | None:
     try:
         with Session(engine) as session:
@@ -182,9 +194,7 @@ def get_myidtravel_account(account_id: int) -> MyidtravelAccount | None:
 def get_stafftraveler_account_by_employee_name(employee_name: str) -> StafftravelerAccount | None:
     try:
         with Session(engine) as session:
-            statement = select(StafftravelerAccount).where(
-                StafftravelerAccount.employee_name == employee_name
-            )
+            statement = select(StafftravelerAccount).where(StafftravelerAccount.employee_name == employee_name)
             return session.exec(statement).first()
     except Exception as exc:
         logger.warning("Failed to fetch stafftraveler account for %s: %s", employee_name, exc)
