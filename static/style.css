@@ -1158,11 +1158,11 @@ body.modal-open {
 }
 
 .find-flight-grid {
-  align-items: stretch;
+  align-items: start;
 }
 
 .find-flight-grid .panel {
-  height: 100%;
+  height: auto;
 }
 
 .empty-state {

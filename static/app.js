@@ -32,6 +32,13 @@ const findFlightAirlineSelect = document.getElementById("find-flight-airline");
 const findFlightForm = document.getElementById("find-flight-form");
 const findFlightResults = document.getElementById("find-flight-results");
 const findFlightHeadedToggle = document.getElementById("find-flight-headed-toggle");
+const findStatusLabel = document.getElementById("find-status-label");
+const findFlightAccountSelect = document.getElementById("find-flight-account");
+const findFlightDependent = document.getElementById("find-flight-dependent");
+const findFlightAddLeg = document.getElementById("find-flight-add-leg");
+const findFlightLegsContainer = document.getElementById("find-flight-legs");
+const findFlightSearchBtn = document.getElementById("find-flight-search");
+const findDownloadXlsxBtn = document.getElementById("download-find-xlsx");
 
 const botProgress = {
   myidtravel: {
@@ -51,6 +58,19 @@ const botProgress = {
     status: document.getElementById("bot-status-stafftraveler"),
     caption: document.getElementById("bot-caption-stafftraveler"),
     card: document.querySelector('[data-bot="stafftraveler"]'),
+  },
+};
+
+const findFlightBotProgress = {
+  google_flights: {
+    bar: document.getElementById("bot-progress-find-google_flights"),
+    status: document.getElementById("bot-status-find-google_flights"),
+    caption: document.getElementById("bot-caption-find-google_flights"),
+  },
+  stafftraveler: {
+    bar: document.getElementById("bot-progress-find-stafftraveler"),
+    status: document.getElementById("bot-status-find-stafftraveler"),
+    caption: document.getElementById("bot-caption-find-stafftraveler"),
   },
 };
 
@@ -85,7 +105,10 @@ const mmddyyyyToIso = (val) => {
 
 let ws;
 let currentRunId = null;
+let findFlightRunId = null;
+let findWs;
 let legs = [createLeg()];
+let findFlightLegs = [createFindFlightLeg()];
 let travelPartners = [];
 let selectedTravellers = [];
 let accountTravellers = [];
@@ -98,6 +121,17 @@ function createLeg(overrides = {}) {
     date: "",
     time: "",
     class: "Economy",
+    ...overrides,
+  };
+}
+
+function createFindFlightLeg(overrides = {}) {
+  return {
+    flight_number: "",
+    origin: "",
+    destination: "",
+    date: "",
+    time: "",
     ...overrides,
   };
 }
@@ -120,6 +154,14 @@ function setStatus(status, text) {
     (status === "completed" ? "ok" : status === "error" ? "error" : "pending");
   statusPill.textContent = text || status;
   statusLabel.textContent = text || status;
+}
+
+function setFindBotProgress(bot, status = "running", percent = 0, caption = "") {
+  const entry = findFlightBotProgress[bot];
+  if (!entry) return;
+  if (entry.bar) entry.bar.style.width = `${percent}%`;
+  if (entry.status) entry.status.textContent = status;
+  if (entry.caption) entry.caption.textContent = caption || "";
 }
 
 function appendLog(msg) {
@@ -197,6 +239,15 @@ function setAccountDependentVisibility() {
   updateTravelPartnersCount();
 }
 
+function setFindFlightDependentVisibility() {
+  if (!findFlightAccountSelect || !findFlightDependent) return;
+  const hasAccount = Boolean(findFlightAccountSelect.value);
+  findFlightDependent.style.display = hasAccount ? "block" : "none";
+  if (findFlightSearchBtn) {
+    findFlightSearchBtn.disabled = !hasAccount;
+  }
+}
+
 async function loadAccounts() {
   if (!accountSelect) return;
   try {
@@ -225,6 +276,34 @@ async function loadAccounts() {
     appendLog("Could not load accounts: " + err.message);
   }
   setAccountDependentVisibility();
+}
+
+async function loadStafftravelerAccounts() {
+  if (!findFlightAccountSelect) return;
+  try {
+    const res = await fetch("/api/stafftraveler-accounts");
+    const data = await res.json();
+    const accounts = data.accounts || [];
+    findFlightAccountSelect.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select account";
+    findFlightAccountSelect.appendChild(placeholder);
+    accounts.forEach((account) => {
+      const opt = document.createElement("option");
+      opt.value = account.id;
+      opt.textContent = account.employee_name;
+      findFlightAccountSelect.appendChild(opt);
+    });
+  } catch (err) {
+    findFlightAccountSelect.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Accounts unavailable";
+    findFlightAccountSelect.appendChild(opt);
+    appendLog("Could not load StaffTraveler accounts: " + err.message);
+  }
+  setFindFlightDependentVisibility();
 }
 
 function updateProgressFromLog(message) {
@@ -487,6 +566,7 @@ function buildPayload() {
     airline: airlineSelect.value,
     travel_status: travelStatusSelect.value,
     nonstop_flights: document.getElementById("nonstop_flights").checked,
+    auto_request_stafftraveler: document.getElementById("auto_request_stafftraveler").checked,
     traveller: selectedTravellers.map((traveller) => ({
       name: traveller.name,
       salutation: traveller.salutation || "",
@@ -505,24 +585,23 @@ function buildPayload() {
 }
 
 function buildFindFlightPayload() {
-  const flightNumber = document.getElementById("find-flight-code")?.value.trim();
+  const accountId = findFlightAccountSelect?.value?.trim() || "";
   const flightType = document.getElementById("find-flight-type")?.value.trim();
   const airline = document.getElementById("find-flight-airline")?.value.trim();
-  const origin = document.getElementById("find-flight-origin")?.value.trim();
-  const destination = document.getElementById("find-flight-destination")?.value.trim();
-  const date = document.getElementById("find-flight-date")?.value;
-  const time = document.getElementById("find-flight-time")?.value.trim();
   const travelClass = document.getElementById("find-flight-class")?.value.trim();
 
   const missing = [];
-  if (!flightNumber) missing.push("Flight Number is required.");
+  if (!accountId) missing.push("StaffTraveler account is required.");
   if (!flightType) missing.push("Flight Type is required.");
-  const airlineValue = airline || "";
-  if (!origin) missing.push("Origin is required.");
-  if (!destination) missing.push("Destination is required.");
-  if (!date) missing.push("Date is required.");
-  if (!time) missing.push("Time is required.");
   if (!travelClass) missing.push("Class is required.");
+  const airlineValue = airline || "";
+  findFlightLegs.forEach((leg, idx) => {
+    if (!leg.flight_number) missing.push(`Leg ${idx + 1}: Flight number is required.`);
+    if (!leg.origin) missing.push(`Leg ${idx + 1}: Origin is required.`);
+    if (!leg.destination) missing.push(`Leg ${idx + 1}: Destination is required.`);
+    if (!leg.date) missing.push(`Leg ${idx + 1}: Date is required.`);
+    if (!leg.time) missing.push(`Leg ${idx + 1}: Time is required.`);
+  });
   if (missing.length) {
     missing.forEach((msg) => showToast(msg));
     throw new Error("Missing required fields.");
@@ -530,13 +609,22 @@ function buildFindFlightPayload() {
 
   return {
     input: {
+      account_id: Number(accountId),
       flight_type: flightType,
       nonstop_flights: document.getElementById("find-flight-nonstop")?.checked || false,
+      auto_request_stafftraveler: document.getElementById("find-flight-auto-request")?.checked || false,
       airline: airlineValue,
       travel_status: "Bookable",
-      trips: [{ origin, destination }],
-      itinerary: [{ date: isoToMmddyyyy(date), time, class: travelClass }],
-      flight_number: flightNumber.replace(/\s+/g, ""),
+      trips: findFlightLegs.map((leg) => ({
+        origin: leg.origin.trim(),
+        destination: leg.destination.trim(),
+      })),
+      itinerary: findFlightLegs.map((leg) => ({
+        date: isoToMmddyyyy(leg.date),
+        time: leg.time.trim(),
+        class: travelClass,
+      })),
+      flight_numbers: findFlightLegs.map((leg) => leg.flight_number.replace(/\s+/g, "")),
     },
     headed: document.getElementById("find-flight-headed")?.checked || false,
   };
@@ -587,21 +675,18 @@ function renderFindFlightCard(data, title, isStaff) {
       </div>
     `;
   } else {
+    const googleSeats = data.seats?.google_flights || {};
     loadsHtml = `
       <div class="loads-container">
-        <span class="section-label">Commercial Details</span>
+        <span class="section-label">Google Seats</span>
         <div class="loads-grid">
           <div class="load-pill">
-            <span>SEATS</span>
-            <strong>${data.seats_available || "-"}</strong>
+            <span>ECONOMY</span>
+            <strong class="load-high">${googleSeats.economy || "-"}</strong>
           </div>
           <div class="load-pill">
-            <span>STOPS</span>
-            <strong>${data.stops || "-"}</strong>
-          </div>
-          <div class="load-pill">
-            <span>EMISSIONS</span>
-            <strong>${data.emissions || "-"}</strong>
+            <span>BUSINESS</span>
+            <strong class="load-low">${googleSeats.business || "-"}</strong>
           </div>
         </div>
       </div>
@@ -686,10 +771,21 @@ async function startFindFlight(event) {
   if (!findFlightResults) return;
   findFlightResults.classList.remove("empty-state");
   findFlightResults.innerHTML = "Searching for matching flight details...";
+  findFlightRunId = null;
+  if (findDownloadXlsxBtn) {
+    findDownloadXlsxBtn.disabled = true;
+  }
+  if (findStatusLabel) {
+    findStatusLabel.textContent = "running";
+  }
+  setFindBotProgress("google_flights", "running", 25, "Searching for matching flights.");
+  setFindBotProgress("stafftraveler", "running", 25, "Checking staff availability.");
   let payload;
   try {
     payload = buildFindFlightPayload();
   } catch (err) {
+    setFindBotProgress("google_flights", "error", 0, "Missing required fields.");
+    setFindBotProgress("stafftraveler", "error", 0, "Missing required fields.");
     return;
   }
 
@@ -703,17 +799,17 @@ async function startFindFlight(event) {
     showToast("Find Flight failed. Check server logs.");
     findFlightResults.classList.add("empty-state");
     findFlightResults.textContent = "Run a search to load flight details.";
+    setFindBotProgress("google_flights", "error", 0, "Lookup failed. Check logs.");
+    setFindBotProgress("stafftraveler", "error", 0, "Lookup failed. Check logs.");
+    if (findStatusLabel) {
+      findStatusLabel.textContent = "error";
+    }
     return;
   }
-
-  const googleEntry = (data.google_flights || [])[0];
-  const googleFlight = googleEntry?.flights?.top_flights?.[0] || null;
-  const staffFlight = (data.stafftraveler || [])[0] || null;
-
-  findFlightResults.innerHTML = `
-    ${renderFindFlightCard(googleFlight, "Google Flights", false)}
-    ${renderFindFlightCard(staffFlight, "StaffTraveler", true)}
-  `;
+  findFlightRunId = data.run_id || null;
+  if (findFlightRunId) {
+    connectFindFlightWebSocket(findFlightRunId);
+  }
 }
 
 function connectWebSocket(runId) {
@@ -771,6 +867,100 @@ function connectWebSocket(runId) {
   ws.onclose = () => appendLog("WebSocket closed.");
 }
 
+async function fetchFindFlightResults(runId) {
+  if (!runId || !findFlightResults) return;
+  const res = await fetch(`/api/find-flight/${runId}`);
+  if (!res.ok) {
+    findFlightResults.classList.add("empty-state");
+    findFlightResults.textContent = "Unable to load flight results.";
+    return;
+  }
+  const data = await res.json();
+  const legsResults = data.legs_results || [];
+  if (!legsResults.length) {
+    findFlightResults.classList.add("empty-state");
+    findFlightResults.textContent = "No flight results returned.";
+    return;
+  }
+
+  findFlightResults.innerHTML = legsResults
+    .map((leg, idx) => {
+      const googleFlight = leg.google_flights || null;
+      const staffFlight = (leg.stafftraveler || [])[0] || null;
+      return `
+        <div class="leg-card">
+          <div class="leg-row">
+            <div class="leg-title">Leg ${idx + 1}</div>
+          </div>
+          ${renderFindFlightCard(googleFlight, "Google Flights", false)}
+          ${renderFindFlightCard(staffFlight, "StaffTraveler", true)}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function connectFindFlightWebSocket(runId) {
+  if (!runId) return;
+  if (findWs) findWs.close();
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  findWs = new WebSocket(`${protocol}://${location.host}/ws/${runId}`);
+
+  findWs.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.type === "progress") {
+      const botKey = payload.bot;
+      const percent = Number(payload.percent || 0);
+      const stepKey = payload.status || "running";
+      const state =
+        stepKey === "done" ? "done" : stepKey === "error" ? "error" : "running";
+      const captions = {
+        launching: "Launching the browser and preparing the session.",
+        loaded: "Page loaded successfully. Preparing to fill the form.",
+        "form filled": "Form inputs completed. Getting ready to submit the search.",
+        submitted: "Search submitted. Waiting for results to load.",
+        "results loaded": "Results are loaded. Extracting flight details.",
+        parsed: "Parsing results into a structured response.",
+        screenshot: "Capturing the final screenshot for this bot.",
+        done: "Finished successfully and ready for review.",
+        error: "Stopped due to an error. Check logs for details.",
+        running: "Working on the current step.",
+        starting: "Starting the bot workflow.",
+      };
+      const captionText = captions[stepKey] || "Working on the current step.";
+      if (botKey === "google_flights" || botKey === "stafftraveler") {
+        setFindBotProgress(botKey, state, percent, captionText);
+      }
+    } else if (payload.type === "status") {
+      if (payload.status === "completed") {
+        setFindBotProgress("google_flights", "done", 100, "Finished successfully and ready for review.");
+        setFindBotProgress("stafftraveler", "done", 100, "Finished successfully and ready for review.");
+        if (findDownloadXlsxBtn) {
+          findDownloadXlsxBtn.disabled = false;
+        }
+        if (findStatusLabel) {
+          findStatusLabel.textContent = "done";
+        }
+        fetchFindFlightResults(runId);
+      } else if (payload.status === "error") {
+        setFindBotProgress("google_flights", "error", 0, "Lookup failed. Check logs.");
+        setFindBotProgress("stafftraveler", "error", 0, "Lookup failed. Check logs.");
+        findFlightResults.classList.add("empty-state");
+        findFlightResults.textContent = "Lookup failed. Check server logs.";
+        if (findStatusLabel) {
+          findStatusLabel.textContent = "error";
+        }
+      } else if (findStatusLabel) {
+        findStatusLabel.textContent = payload.status || "running";
+      }
+    }
+  };
+
+  findWs.onclose = () => {
+    findWs = null;
+  };
+}
+
 async function fetchResults(runId) {
   if (!runId) return;
   try {
@@ -805,6 +995,23 @@ async function download(kind) {
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = `${currentRunId}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function downloadFindXlsx() {
+  if (!findFlightRunId) return;
+  const url = `/api/runs/${findFlightRunId}/download/excel`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    appendLog("Download failed (excel)");
+    return;
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${findFlightRunId}.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -870,6 +1077,72 @@ function renderLegs() {
 
     card.appendChild(grid);
     legsContainer.appendChild(card);
+  });
+}
+
+function renderFindFlightLegs() {
+  if (!findFlightLegsContainer) return;
+  const type = document.getElementById("find-flight-type")?.value || "one-way";
+  findFlightLegsContainer.innerHTML = "";
+  findFlightLegs.forEach((leg, idx) => {
+    const card = document.createElement("div");
+    card.className = "leg-card";
+
+    const row = document.createElement("div");
+    row.className = "leg-row";
+    const title = document.createElement("div");
+    title.className = "leg-title";
+    if (type === "round-trip") {
+      title.textContent =
+        idx === 0
+          ? "Departure leg"
+          : idx === 1
+          ? "Return leg"
+          : `Leg ${idx + 1}`;
+    } else {
+      title.textContent = `Leg ${idx + 1}`;
+    }
+    row.appendChild(title);
+
+    if (type === "multiple-legs" && findFlightLegs.length > 1) {
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "remove-btn";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => {
+        findFlightLegs.splice(idx, 1);
+        renderFindFlightLegs();
+      });
+      row.appendChild(removeBtn);
+    }
+    card.appendChild(row);
+
+    const grid = document.createElement("div");
+    grid.className = "leg-grid";
+    grid.appendChild(
+      makeInput(
+        "Flight Number",
+        leg.flight_number,
+        "e.g. EY1",
+        (val) => (leg.flight_number = val)
+      )
+    );
+    grid.appendChild(
+      makeInput("Origin", leg.origin, "e.g. AUH", (val) => (leg.origin = val))
+    );
+    grid.appendChild(
+      makeInput(
+        "Destination",
+        leg.destination,
+        "e.g. JFK",
+        (val) => (leg.destination = val)
+      )
+    );
+    grid.appendChild(makeDateInput(leg));
+    grid.appendChild(makeTimeSelect(leg));
+
+    card.appendChild(grid);
+    findFlightLegsContainer.appendChild(card);
   });
 }
 
@@ -1170,19 +1443,38 @@ function ensureLegsMatchType() {
     type === "multiple-legs" ? "inline-flex" : "none";
 }
 
+function ensureFindFlightLegsMatchType() {
+  const type = document.getElementById("find-flight-type")?.value || "one-way";
+  if (type === "one-way") {
+    findFlightLegs = [findFlightLegs[0] || createFindFlightLeg()];
+  } else if (type === "round-trip") {
+    while (findFlightLegs.length < 2) findFlightLegs.push(createFindFlightLeg());
+    findFlightLegs = findFlightLegs.slice(0, 2);
+  } else if (type === "multiple-legs" && findFlightLegs.length === 0) {
+    findFlightLegs = [createFindFlightLeg()];
+  }
+  renderFindFlightLegs();
+  if (findFlightAddLeg) {
+    findFlightAddLeg.style.display = type === "multiple-legs" ? "inline-flex" : "none";
+  }
+}
+
 async function loadAirlines() {
   try {
-    const res = await fetch("/airlines.json");
+    const res = await fetch("/api/airlines");
     const data = await res.json();
+    const airlines = data.airlines || [];
     airlineSelect.innerHTML = "";
     const blank = document.createElement("option");
     blank.value = "";
     blank.textContent = "Select airline (optional)";
     airlineSelect.appendChild(blank);
-    data.forEach((item) => {
+    airlines.forEach((item) => {
       const opt = document.createElement("option");
       opt.value = item.value;
-      opt.textContent = item.label || item.value;
+      opt.textContent = item.label
+        ? `${item.value} - ${item.label}`
+        : item.value;
       opt.disabled = item.disabled;
       airlineSelect.appendChild(opt);
     });
@@ -1192,10 +1484,12 @@ async function loadAirlines() {
       blankFind.value = "";
       blankFind.textContent = "Select airline (optional)";
       findFlightAirlineSelect.appendChild(blankFind);
-      data.forEach((item) => {
+      airlines.forEach((item) => {
         const opt = document.createElement("option");
         opt.value = item.value;
-        opt.textContent = item.label || item.value;
+        opt.textContent = item.label
+          ? `${item.value} - ${item.label}`
+          : item.value;
         opt.disabled = item.disabled;
         findFlightAirlineSelect.appendChild(opt);
       });
@@ -1213,11 +1507,12 @@ async function loadAirlines() {
       fallbackOpt.textContent = "Airlines unavailable";
       findFlightAirlineSelect.appendChild(fallbackOpt);
     }
-    appendLog("Could not load airlines.json: " + err.message);
+    appendLog("Could not load airlines: " + err.message);
   }
 }
 
 downloadXlsxBtn.addEventListener("click", () => download("excel"));
+findDownloadXlsxBtn?.addEventListener("click", downloadFindXlsx);
 form.addEventListener("submit", startRun);
 findFlightForm?.addEventListener("submit", startFindFlight);
 document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
@@ -1235,6 +1530,12 @@ accountSelect?.addEventListener("change", () => {
     travellerList.style.display = "none";
   }
   renderTravellerList();
+});
+document.getElementById("find-flight-type")?.addEventListener("change", ensureFindFlightLegsMatchType);
+findFlightAccountSelect?.addEventListener("change", setFindFlightDependentVisibility);
+findFlightAddLeg?.addEventListener("click", () => {
+  findFlightLegs.push(createFindFlightLeg());
+  renderFindFlightLegs();
 });
 addFlightBtn.addEventListener("click", () => {
   if (flightTypeSelect.value !== "multiple-legs") return;
@@ -1286,6 +1587,8 @@ renderTravelPartners();
 renderTravellerList();
 loadAirlines();
 loadAccounts();
+loadStafftravelerAccounts();
+ensureFindFlightLegsMatchType();
 const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 if (headedToggle && !isDevHost) {
   headedToggle.style.display = "none";

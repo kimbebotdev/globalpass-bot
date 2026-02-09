@@ -5,7 +5,7 @@ import logging
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,6 @@ from bots.myidtravel_bot import read_input
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
-MAX_ADULTS = 9
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
     logging.basicConfig(
@@ -161,67 +160,6 @@ async def _apply_nonstop_filter(page) -> None:
         except Exception:
             pass
 
-    close_button = page.locator("button.VfPpkd-Bz112c-LgbsSe.yHy1rc.eT1oJ.mN1ivc.evEd9e.HJuSVb").first
-    if await close_button.count():
-        try:
-            await close_button.click()
-        except Exception:
-            pass
-
-    await page.wait_for_timeout(400)
-
-
-async def _apply_airline_filter(page, airline_names: set[str]) -> None:
-    if not airline_names:
-        return
-
-    airlines_button = page.get_by_role("button", name=re.compile("Airlines", re.I))
-    if not await airlines_button.count():
-        return
-
-    try:
-        await airlines_button.click()
-        await page.wait_for_timeout(6000)
-    except Exception:
-        return
-
-    clear_btn = page.locator('button[class="VfPpkd-scr2fc VfPpkd-scr2fc-OWXEXe-gk6SMd LXctle pBHsAc xdLGIc"]').first
-    if await clear_btn.count():
-        try:
-            await clear_btn.click()
-            await page.wait_for_timeout(6000)
-        except Exception:
-            pass
-
-    for name in sorted(airline_names):
-        checkbox = page.locator(f'input[type="checkbox"][value="{name}"]').first
-        if not await checkbox.count():
-            checkbox = page.locator(f'input[type="checkbox"][aria-label="{name}"]').first
-        if not await checkbox.count():
-            checkbox = page.locator(f'label:has-text("{name}") >> input[type="checkbox"]').first
-        if not await checkbox.count():
-            continue
-        try:
-            await checkbox.set_checked(True)
-            await page.wait_for_timeout(120)
-        except Exception:
-            try:
-                await checkbox.click()
-                await page.wait_for_timeout(120)
-            except Exception:
-                pass
-
-    done_button = page.get_by_role("button", name=re.compile("Done|Close|Save|Apply", re.I))
-    if await done_button.count():
-        try:
-            await done_button.click()
-        except Exception:
-            pass
-    else:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
     await page.wait_for_timeout(400)
 
 
@@ -258,70 +196,50 @@ def _extract_stops(text: str) -> str:
     return ""
 
 
-def _normalize_flight_number(value: str | None) -> str:
-    return re.sub(r"\s+", "", value or "").upper()
+async def _scrape_section(listitems, limit: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    if not listitems:
+        return results
+    count = min(await listitems.count(), limit)
+    for idx in range(count):
+        card = listitems.nth(idx)
+        aria_summary = (await card.get_attribute("aria-label")) or ""
+        try:
+            text_summary = (await card.inner_text()).strip()
+        except Exception:
+            text_summary = aria_summary
+
+        airline = ""
+        airline_loc = card.locator(".sSHqwe, .Ir0Voe")
+        if await airline_loc.count():
+            try:
+                airline = (await airline_loc.first.inner_text()).strip()
+            except Exception:
+                airline = ""
+
+        if not airline and aria_summary:
+            airline = aria_summary.split(",")[0].replace("Select", "").strip()
+
+        price = _extract_price(aria_summary or text_summary)
+        duration = _extract_duration(aria_summary or text_summary)
+        depart_time, arrive_time = _extract_times(aria_summary or text_summary)
+        stops = _extract_stops(aria_summary or text_summary)
+
+        results.append(
+            {
+                "airline": airline,
+                "price": price,
+                "duration": duration,
+                "depart_time": depart_time,
+                "arrival_time": arrive_time,
+                "stops": stops,
+                "summary": aria_summary or text_summary,
+            }
+        )
+    return results
 
 
-def _seat_class_key(seat_class: str) -> str:
-    seat = (seat_class or "").strip().lower()
-    if "business" in seat:
-        return "business"
-    if "first" in seat:
-        return "first"
-    return "economy"
-
-
-def _flight_number_candidates(flight: dict[str, Any]) -> set[str]:
-    code = (flight.get("airline_code") or "").strip().upper()
-    number = _normalize_flight_number(flight.get("flight_number"))
-    candidates: set[str] = set()
-    if number:
-        candidates.add(number)
-    if code and number and not number.startswith(code):
-        candidates.add(f"{code}{number}")
-    return candidates
-
-
-def _build_leg_maps(
-    input_data: dict[str, Any],
-) -> tuple[
-    dict[tuple[str, str, str], str],
-    dict[tuple[str, str, str], str],
-    dict[tuple[str, str], str],
-    dict[tuple[str, str], str],
-]:
-    trips = input_data.get("trips") or []
-    itinerary = input_data.get("itinerary") or []
-    date_map: dict[tuple[str, str, str], str] = {}
-    class_map: dict[tuple[str, str, str], str] = {}
-    date_fallback: dict[tuple[str, str], str] = {}
-    class_fallback: dict[tuple[str, str], str] = {}
-    for idx, trip in enumerate(trips):
-        if not isinstance(trip, dict):
-            continue
-        origin = (trip.get("origin") or "").strip().upper()
-        destination = (trip.get("destination") or "").strip().upper()
-        if not origin or not destination:
-            continue
-        leg = itinerary[idx] if idx < len(itinerary) and isinstance(itinerary, list) else {}
-        date_val = (leg.get("date") or "").strip() if isinstance(leg, dict) else ""
-        class_val = (leg.get("class") or "").strip() if isinstance(leg, dict) else ""
-        pair_key = (origin, destination)
-        if date_val:
-            date_map[(origin, destination, date_val)] = date_val
-            date_fallback[pair_key] = date_val
-        if class_val:
-            class_map[(origin, destination, date_val or "")] = class_val
-            class_fallback[pair_key] = class_val
-    return date_map, class_map, date_fallback, class_fallback
-
-
-async def _scrape_section(
-    items,
-    limit: int,
-    flight_number: str | None = None,
-    seats_available: str | None = None,
-) -> list[dict[str, Any]]:
+async def _scrape_section(items, limit: int) -> list[dict[str, Any]]:
     """
     Scrape flight information from a list of flight card items.
     """
@@ -332,19 +250,7 @@ async def _scrape_section(
         card = items.nth(idx)
         try:
             flight_data = await _extract_flight_data(card)
-            if not flight_data:
-                continue
-            extra_details = await _extract_extra_flight_details(
-                card,
-                seats_available=seats_available or str(MAX_ADULTS),
-            )
-            if extra_details:
-                flight_data.update(extra_details)
-            if flight_number:
-                scraped_number = (flight_data.get("flight_number") or "").replace(" ", "").upper()
-                if scraped_number == flight_number.upper():
-                    results.append(flight_data)
-            else:
+            if flight_data:
                 results.append(flight_data)
         except Exception as e:
             logger.error("Error scraping card %s: %s", idx, e, exc_info=True)
@@ -506,58 +412,16 @@ async def _extract_flight_data(card) -> dict[str, Any]:
     return flight_data
 
 
-async def _extract_extra_flight_details(card, seats_available: str) -> dict[str, Any]:
-    details = {}
-    try:
-        toggle = card.locator("svg.SadNne.NMm5M").first
-        if await toggle.count():
-            try:
-                await toggle.dispatch_event("click")
-                await card.page.wait_for_timeout(200)
-            except Exception:
-                pass
+async def _scrape_results(page, limit: int = 30) -> dict[str, list[dict[str, Any]]]:
+    """
+    Scrape results grouped into top_flights and other_flights using the tabpanel
+    inside the main results container. Falls back to a flat list under 'all' if
+    sections are not found.
+    """
+    top_flights: list[dict[str, Any]] = []
+    other_flights: list[dict[str, Any]] = []
 
-        extra_details = card.locator("div.MX5RWe.sSHqwe.y52p7d").first
-        if not await extra_details.count():
-            return details
-
-        try:
-            class_text = (await extra_details.locator('span[jsname="Pvlywd"]').first.inner_text()).strip()
-            if class_text:
-                details["class"] = class_text
-        except Exception:
-            pass
-
-        try:
-            flight_number = (await extra_details.locator("span.Xsgmwe.QS0io").first.inner_text()).strip()
-            if flight_number:
-                details["flight_number"] = re.sub(r"\s+", "", flight_number.replace("\xa0", " "))
-        except Exception:
-            pass
-
-        try:
-            aircraft_nodes = await extra_details.locator("span.Xsgmwe").all_inner_texts()
-            aircraft_nodes = [t.strip() for t in aircraft_nodes if t and t.strip()]
-            if details.get("flight_number"):
-                aircraft_nodes = [t for t in aircraft_nodes if re.sub(r"\s+", "", t) != details["flight_number"]]
-            if aircraft_nodes:
-                details["aircraft"] = aircraft_nodes[-1].replace("\xa0", " ").strip()
-        except Exception:
-            pass
-
-        details["seats_available"] = seats_available
-    except Exception:
-        return details
-
-    return details
-
-
-async def _scrape_sections_once(
-    page,
-    limit: int,
-    seats_available: str,
-) -> list[dict[str, Any]]:
-    collected: list[dict[str, Any]] = []
+    # Find visible tabpanel inside the main results container.
     main_panels = page.locator("div.FXkZv[role='main'] div.eQ35Ce div[role='tabpanel']")
     panel = None
     try:
@@ -574,8 +438,11 @@ async def _scrape_sections_once(
         panel = None
 
     if panel:
+        # Identify child sections; two of them should contain the lists.
         sections = panel.locator("> div")
         sec_count = await sections.count()
+        found_top = None
+        found_other = None
 
         for i in range(sec_count):
             sec = sections.nth(i)
@@ -587,6 +454,7 @@ async def _scrape_sections_once(
             except Exception:
                 label = ""
 
+            # Look for list items - try ul > li structure first
             items = sec.locator("ul li.pIav2d")
             if not await items.count():
                 items = sec.locator("li.pIav2d")
@@ -595,280 +463,106 @@ async def _scrape_sections_once(
             if not await items.count():
                 items = sec.locator("li[role='listitem']")
 
-            if not await items.count():
-                continue
-
-            flights = await _scrape_section(
-                items,
-                limit,
-                seats_available=seats_available,
-            )
-            for flight in flights:
-                flight["section"] = label or "Other flights"
-            collected.extend(flights)
-
-    logger.info("Found %s flights across sections (adults=%s)", len(collected), seats_available)
-    return collected
-
-
-async def _scrape_results(
-    page,
-    limit: int = 30,
-    flight_number: str | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """
-    Scrape results grouped into top_flights and other_flights using the tabpanel
-    inside the main results container. Falls back to a flat list if sections are not found.
-    """
-    top_flights: list[dict[str, Any]] = []
-    other_flights: list[dict[str, Any]] = []
-    adults = MAX_ADULTS
-
-    while True:
-        # Find visible tabpanel inside the main results container.
-        main_panels = page.locator("div.FXkZv[role='main'] div.eQ35Ce div[role='tabpanel']")
-        panel = None
-        try:
-            count = await main_panels.count()
-            for i in range(count):
-                candidate = main_panels.nth(i)
-                try:
-                    if await candidate.is_visible():
-                        panel = candidate
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            panel = None
-
-        found_top = None
-        found_other = None
-        if panel:
-            sections = panel.locator("> div")
-            sec_count = await sections.count()
-
-            for i in range(sec_count):
-                sec = sections.nth(i)
-                heading = sec.get_by_role("heading").first
-                label = ""
-                try:
-                    if await heading.count():
-                        label = (await heading.inner_text()).strip()
-                except Exception:
-                    label = ""
-
-                items = sec.locator("ul li.pIav2d")
-                if not await items.count():
-                    items = sec.locator("li.pIav2d")
-                if not await items.count():
-                    items = sec.locator("ul li[role='listitem']")
-                if not await items.count():
-                    items = sec.locator("li[role='listitem']")
-
-                if re.search(r"top flight", label, re.I):
-                    found_top = items
-                elif re.search(r"other flight", label, re.I):
-                    found_other = items
-                elif found_top is None and await items.count():
-                    found_top = items
+            if re.search(r"top flight", label, re.I):
+                found_top = items
+            elif re.search(r"other flight", label, re.I):
+                found_other = items
+            elif found_top is None and await items.count():
+                found_top = items
+            elif found_other is None and await items.count():
+                found_other = items
 
         if found_top:
-            logger.info("Found %s top flights (adults=%s)", await found_top.count(), adults)
-            top_flights = await _scrape_section(
-                found_top,
-                limit,
-                flight_number=flight_number,
-                seats_available=str(adults),
-            )
+            logger.info("Found %s top flights", await found_top.count())
+            top_flights = await _scrape_section(found_top, limit)
         if found_other:
-            logger.info("Found %s other flights (adults=%s)", await found_other.count(), adults)
-            other_flights = await _scrape_section(
-                found_other,
-                limit,
-                flight_number=flight_number,
-                seats_available=str(adults),
-            )
+            logger.info("Found %s other flights", await found_other.count())
+            other_flights = await _scrape_section(found_other, limit)
 
-        if not flight_number or top_flights or other_flights:
-            break
+    all_flights: list[dict[str, Any]] = []
+    if not top_flights and not other_flights:
+        logger.info("No sections found, trying flat list scrape")
+        selectors = [
+            "div.FXkZv[role='main'] li.pIav2d",
+            "li.pIav2d",
+            "div.FXkZv[role='main'] li[role='listitem']",
+            "[aria-label*='Results list'] div[role='listitem']",
+            "ul[role='listbox'] li[role='listitem']",
+            "li[role='listitem']",
+            "[aria-label*='Flight result']",
+        ]
+        cards = None
+        for sel in selectors:
+            loc = page.locator(sel)
+            if await loc.count():
+                logger.info("Found %s flights using selector: %s", await loc.count(), sel)
+                cards = loc
+                break
+        if cards:
+            all_flights = await _scrape_section(cards, limit)
 
-        if adults <= 1:
-            top_flights = []
-            other_flights = []
-            break
-
-        adults = await _decrement_adults(page, adults)
-        await _wait_for_results(page, timeout_ms=12000)
-
-    return {"top_flights": top_flights, "other_flights": other_flights}
+    return {"top_flights": top_flights, "other_flights": other_flights, "all": all_flights}
 
 
-async def update_selectable_flights(
-    headless: bool,
-    input_data: dict[str, Any],
-    selectable_payload: list[dict[str, Any]],
-    limit: int = 30,
-    screenshot: str | None = None,
-    progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
-) -> list[dict[str, Any]]:
-    logger.info("Starting Google Flights selectable search headless=%s limit=%s", headless, limit)
-    nonstop_only = bool(input_data.get("nonstop_flights"))
-    date_map, class_map, date_fallback, class_fallback = _build_leg_maps(input_data)
-    fallback_date = ""
-    fallback_class = ""
-    if input_data.get("itinerary"):
-        fallback_date = input_data["itinerary"][0].get("date", "")
-        fallback_class = input_data["itinerary"][0].get("class", "")
+def _age_from_dob(dob_str: str) -> int | None:
+    if not dob_str:
+        return None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            born = datetime.strptime(dob_str, fmt).date()
+            today = date.today()
+            years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+            return years
+        except Exception:
+            continue
+    return None
 
-    if not selectable_payload:
-        return selectable_payload
 
-    async with async_playwright() as p:
-        if progress_cb:
-            await progress_cb(5, "launching")
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
-        page = await context.new_page()
+def _compute_passenger_clicks(input_data: dict[str, Any]) -> dict[str, int]:
+    traveller = input_data.get("traveller") or []
+    partners = input_data.get("travel_partner") or []
 
-        total_routings = sum(1 for routing in selectable_payload if isinstance(routing, dict))
-        processed = 0
+    adults = max(len(traveller), 1)  # Google defaults to 1 adult
+    children = 0
+    infant_seat = 0
+    infant_lap = 0
 
-        for routing in selectable_payload:
-            if not isinstance(routing, dict):
+    for partner in partners:
+        own_seat = partner.get("own_seat", True)
+        p_type = (partner.get("type") or "").lower()
+        if p_type == "adult":
+            if own_seat:
+                adults += 1
+            continue
+
+        if p_type == "child":
+            age = _age_from_dob(partner.get("dob", ""))
+            if age is None:
+                # Assume child if unknown age and has seat
+                if own_seat:
+                    children += 1
                 continue
-            flights = routing.get("flights") or []
-            if not isinstance(flights, list):
-                continue
-            first_flight = next((f for f in flights if isinstance(f, dict)), None)
-            if not first_flight:
-                continue
-            origin = (first_flight.get("departure") or "").strip().upper()
-            destination = (first_flight.get("arrival") or "").strip().upper()
-            if not origin or not destination:
-                continue
-            routing_info = routing.get("routingInfo") or {}
-            routing_date = ""
-            if isinstance(routing_info, dict):
-                routing_date = (
-                    routing_info.get("departureDate")
-                    or routing_info.get("date")
-                    or routing_info.get("departDate")
-                    or ""
-                )
-                routing_date = str(routing_date).strip()
-            date_val = (
-                date_map.get((origin, destination, routing_date))
-                or date_fallback.get((origin, destination))
-                or fallback_date
-            )
-            seat_class = (
-                class_map.get((origin, destination, date_val))
-                or class_fallback.get((origin, destination))
-                or fallback_class
-            )
-            seat_key = _seat_class_key(seat_class)
-            airline_names = {
-                (f.get("airline_name") or "").strip()
-                for f in flights
-                if isinstance(f, dict) and (f.get("airline_name") or "").strip()
-            }
 
-            await page.goto("https://www.google.com/travel/flights")
-            await _handle_cookie_banner(page)
-            if progress_cb:
-                await progress_cb(15, "loaded")
+            if age < 2:
+                if own_seat:
+                    infant_seat += 1
+                else:
+                    infant_lap += 1
+            elif 2 <= age <= 11:
+                if own_seat:
+                    children += 1
+            else:
+                if own_seat:
+                    adults += 1
 
-            await _switch_trip_type(page, "one-way")
-            await _max_adults(page)
-            await _select_seat_class(page, seat_class)
-            if progress_cb:
-                await progress_cb(35, "form filled")
-
-            await _fill_basic_form(page, origin, destination, date_val, "")
-
-            search_btn = page.get_by_role("button", name=re.compile("Search", re.I)).first
-            if await search_btn.count():
-                try:
-                    await search_btn.click()
-                except Exception:
-                    pass
-            if progress_cb:
-                await progress_cb(50, "submitted")
-
-            try:
-                await page.wait_for_load_state("networkidle", timeout=20000)
-            except PlaywrightTimeout:
-                pass
-
-            if nonstop_only:
-                await _apply_nonstop_filter(page)
-            await _apply_airline_filter(page, airline_names)
-
-            await _wait_for_results(page, timeout_ms=15000)
-
-            adults = MAX_ADULTS
-            while True:
-                section_flights = await _scrape_sections_once(page, limit=limit, seats_available=str(adults))
-                google_numbers = {}
-                for item in section_flights:
-                    number = _normalize_flight_number(item.get("flight_number"))
-                    if number:
-                        google_numbers[number] = item
-
-                for flight in flights:
-                    if not isinstance(flight, dict):
-                        continue
-                    seats = flight.get("seats") or {}
-                    gf_seats = seats.get("google_flights") or {}
-                    if gf_seats.get(seat_key):
-                        continue
-                    candidates = _flight_number_candidates(flight)
-                    matched = None
-                    for candidate in candidates:
-                        if candidate in google_numbers:
-                            matched = google_numbers[candidate]
-                            break
-                    if matched:
-                        gf_seats[seat_key] = str(adults)
-                        seats["google_flights"] = gf_seats
-                        flight["google_flights_section"] = matched.get("section") or "Other flights"
-                        flight["seats"] = seats
-
-                all_updated = True
-                for flight in flights:
-                    if not isinstance(flight, dict):
-                        continue
-                    seats = (flight.get("seats") or {}).get("google_flights") or {}
-                    if not seats.get(seat_key):
-                        all_updated = False
-                        break
-
-                if all_updated or adults <= 1:
-                    break
-
-                adults = await _decrement_adults(page, adults)
-                await _wait_for_results(page, timeout_ms=12000)
-
-            processed += 1
-            if progress_cb and total_routings:
-                await progress_cb(60 + int(30 * processed / total_routings), "results loaded")
-
-        if screenshot:
-            try:
-                screenshot_path = Path(screenshot)
-                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(screenshot_path), full_page=True)
-                if progress_cb:
-                    await progress_cb(95, "screenshot")
-            except Exception:
-                pass
-
-        await browser.close()
-
-    if progress_cb:
-        await progress_cb(100, "done")
-
-    return selectable_payload
+    # Convert totals to "add" counts (Google already has 1 adult selected)
+    add_adults = max(adults - 1, 0)
+    return {
+        "adult": add_adults,
+        "child": children,
+        "infant_seat": infant_seat,
+        "infant_lap": infant_lap,
+    }
 
 
 async def _wait_for_results(page, timeout_ms: int = 15000) -> None:
@@ -1053,8 +747,7 @@ async def _fill_leg_row(page, idx: int, origin: str, destination: str, date_str:
             except Exception:
                 try:
                     await date_field.evaluate(
-                        """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true })); }""",
+                        "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                         _iso_date(date_str),
                     )
                 except Exception:
@@ -1327,8 +1020,7 @@ async def _fill_basic_form(
         except Exception:
             try:
                 await depart_field.evaluate(
-                    """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); 
-                    el.dispatchEvent(new Event('change', { bubbles: true })); }""",
+                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                     _iso_date(depart_date),
                 )
             except Exception:
@@ -1365,8 +1057,7 @@ async def _fill_basic_form(
             except Exception:
                 try:
                     await ret_field.evaluate(
-                        """(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); 
-                        el.dispatchEvent(new Event('change', { bubbles: true })); }""",
+                        "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                         _iso_date(return_date),
                     )
                 except Exception:
@@ -1436,18 +1127,16 @@ async def scrape_basic_form(
     }
 
 
-async def _max_adults(page) -> None:
+async def _select_passengers(page, input_data: dict[str, Any]) -> None:
+    counts = _compute_passenger_clicks(input_data)
     form = page.locator(config.GF_FORM_CONTAINER).first
     if not await form.count():
         form = page
-
     pax_toggle = form.locator(config.GF_PASSENGER_TOGGLE).first
     if not await pax_toggle.count():
         pax_toggle = page.get_by_role("button", name=re.compile("passenger|traveler|adult", re.I))
-
     if not await pax_toggle.count():
         return
-
     try:
         await pax_toggle.click()
         await page.wait_for_timeout(200)
@@ -1457,15 +1146,24 @@ async def _max_adults(page) -> None:
     def _button(selector: str):
         return page.locator(selector).first
 
-    btn = _button(config.GF_PAX_ADD_ADULT)
-    for _ in range(MAX_ADULTS - 1):
-        if not await btn.count():
-            break
-        try:
-            await btn.click()
-            await page.wait_for_timeout(120)
-        except Exception:
-            break
+    mapping = {
+        "adult": config.GF_PAX_ADD_ADULT,
+        "child": config.GF_PAX_ADD_CHILD,
+        "infant_seat": config.GF_PAX_ADD_INFANT_SEAT,
+        "infant_lap": config.GF_PAX_ADD_INFANT_LAP,
+    }
+
+    for key, selector in mapping.items():
+        clicks = counts.get(key, 0)
+        btn = _button(selector)
+        for _ in range(clicks):
+            if not await btn.count():
+                break
+            try:
+                await btn.click()
+                await page.wait_for_timeout(120)
+            except Exception:
+                break
 
     # Close the dialog if a close/done exists; otherwise press Escape.
     done = page.get_by_role("button", name=re.compile("Done|Close|Save", re.I))
@@ -1480,61 +1178,6 @@ async def _max_adults(page) -> None:
         except Exception:
             pass
     await page.wait_for_timeout(200)
-
-
-async def _decrement_adults(page, current: int) -> int:
-    if current <= 1:
-        return current
-
-    form = page.locator(config.GF_FORM_CONTAINER).first
-    if not await form.count():
-        form = page
-
-    pax_toggle = form.locator(config.GF_PASSENGER_TOGGLE).first
-    if not await pax_toggle.count():
-        pax_toggle = page.get_by_role("button", name=re.compile("passenger|traveler|adult", re.I))
-
-    if not await pax_toggle.count():
-        return current
-
-    try:
-        await pax_toggle.click()
-        await page.wait_for_timeout(200)
-    except Exception:
-        return current
-
-    row = page.locator("div:has-text('Adults')").first
-    minus = None
-    if await row.count():
-        minus = row.locator(
-            "button[aria-label*='decrease' i], button[aria-label*='remove' i], button[aria-label*='minus' i]"
-        ).first
-        if not await minus.count():
-            minus = row.locator("button").first
-    else:
-        minus = page.locator(
-            "button[aria-label*='decrease' i], button[aria-label*='remove' i], button[aria-label*='minus' i]"
-        ).first
-    try:
-        if minus and await minus.count():
-            await minus.click()
-            current -= 1
-    except Exception:
-        pass
-
-    done = page.get_by_role("button", name=re.compile("Done|Close|Save", re.I))
-    if await done.count():
-        try:
-            await done.click()
-        except Exception:
-            pass
-    else:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-    await page.wait_for_timeout(200)
-    return current
 
 
 async def _select_seat_class(page, seat_class: str) -> None:
@@ -1589,12 +1232,7 @@ async def run(
     input_data: dict[str, Any] | None = None,
     progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
-    logger.info(
-        "Starting Google Flights run headless=%s input=%s limit=%s",
-        headless,
-        input_path,
-        limit,
-    )
+    logger.info("Starting Google Flights run headless=%s input=%s limit=%s", headless, input_path, limit)
     resolved_input = input_data or read_input(input_path or "input.json")
     legs, flight_type = build_legs(resolved_input)
     logger.info("Prepared %s leg(s) for flight_type=%s", len(legs), flight_type)
@@ -1617,16 +1255,12 @@ async def run(
 
         # Set trip type, passengers, seat class
         await _switch_trip_type(page, flight_type)
-        await _max_adults(page)
+        await _select_passengers(page, resolved_input)
         seat_class = ""
         if resolved_input.get("itinerary"):
             seat_class = resolved_input["itinerary"][0].get("class", "")
         await _select_seat_class(page, seat_class)
-        logger.info(
-            "Configured trip type=%s passengers seat_class=%s",
-            flight_type,
-            seat_class or "default",
-        )
+        logger.info("Configured trip type=%s passengers seat_class=%s", flight_type, seat_class or "default")
         if progress_cb:
             await progress_cb(35, "form filled")
 
@@ -1675,11 +1309,6 @@ async def run(
             await _apply_nonstop_filter(page)
             logger.info("Applied nonstop filter")
 
-        airline_name = (resolved_input.get("airline_name") or "").strip()
-        if airline_name:
-            await _apply_airline_filter(page, {airline_name})
-            logger.info("Applied airline filter for %s", airline_name)
-
         try:
             await _wait_for_results(page, timeout_ms=15000)
         except Exception:
@@ -1688,17 +1317,17 @@ async def run(
             except PlaywrightTimeout:
                 pass
 
-        flight_number = (resolved_input.get("flight_number") or "").replace(" ", "").upper()
-        flights = await _scrape_results(page, limit=limit, flight_number=flight_number or None)
+        flights = await _scrape_results(page, limit=limit)
         if progress_cb:
             await progress_cb(85, "parsed")
         logger.info(
-            "Scraped flights: top=%s other=%s",
+            "Scraped flights: top=%s other=%s all=%s",
             len(flights.get("top_flights", [])),
             len(flights.get("other_flights", [])),
+            len(flights.get("all", [])),
         )
         if not any(flights.values()):
-            flights = {"top_flights": [], "other_flights": []}
+            flights = {"top_flights": [], "other_flights": [], "all": []}
         results.append(
             {
                 "type": "multi-city" if flight_type == "multiple-legs" and len(legs) > 1 else flight_type,

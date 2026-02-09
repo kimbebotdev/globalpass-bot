@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ import bcrypt
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import Page, async_playwright
 from slack_sdk.errors import SlackApiError
@@ -24,21 +26,31 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 from starlette.middleware.sessions import SessionMiddleware
 
+from models import StafftravelerAccount
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True, interpolate=False)
 
 import config
-from bots import google_flights_bot, google_flights_bot_2, myidtravel_bot, stafftraveler_bot, stafftraveler_bot_2
+from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 from db import (
     create_run_record,
     ensure_data_dir,
     get_account_options,
+    get_airline_label,
+    get_latest_standby_response,
+    get_lookup_response,
     get_myidtravel_account,
     get_stafftraveler_account_by_employee_name,
+    get_stafftraveler_account_by_id,
+    list_airlines,
+    list_stafftraveler_accounts,
+    save_airlines,
     save_lookup_response,
     save_standby_response,
     update_run_record,
 )
+from helpers import scrape_airlines as scrape_airlines_helper
 
 logger = logging.getLogger("globalpass")
 if not logging.getLogger().handlers:
@@ -714,6 +726,36 @@ async def _generate_flight_loads_gemini(
     return None, text
 
 
+async def _generate_top5_from_standby_payload(
+    input_data: dict[str, Any],
+    standby_payload: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]] | None, str]:
+    route = _build_route_string(input_data)
+    logger.info("Gemini: model=%s route=%s (standby payload)", config.GEMINI_MODEL, route)
+    prompt = (
+        "Context: I am a software engineer and frequent user of staff travel benefits. "
+        "I am providing you with a JSON payload that contains selectable flights from myIDTravel "
+        "augmented with seat availability from Google Flights and StaffTraveler.\n\n"
+        f"Task: Analyze the payload to identify the top 5 flight options for the route {route}.\n\n"
+        "Requirements:\n"
+        "1. Use seat availability across sources to rank the top 5 flights. "
+        "If multiple sources disagree, prefer StaffTraveler for staff loads and Google Flights for public seats.\n"
+        "2. Output format: Return a JSON array of 5 objects with keys: "
+        "flight_number, airline_name, origin, destination, departure_time, arrival_time, "
+        "date, load_summary, and source_notes.\n"
+        "3. Be concise and return only JSON.\n\n"
+        "Standby Bot Payload JSON:\n"
+        f"{json.dumps(standby_payload)}\n"
+    )
+    logger.info("Gemini: sending request (prompt chars=%s)", len(prompt))
+    text = await asyncio.to_thread(_call_gemini, prompt)
+    logger.info("Gemini: received response (chars=%s)", len(text))
+    parsed = _extract_json_from_text(text)
+    if isinstance(parsed, list):
+        return parsed, text
+    return None, text
+
+
 def _is_valid_date_mmddyyyy(value: str) -> bool:
     try:
         datetime.strptime(value, "%m/%d/%Y")
@@ -736,6 +778,11 @@ def _validate_and_normalize_input(input_data: dict[str, Any]) -> tuple[dict[str,
     normalized["airline"] = normalized.get("airline") or ""
     if "nonstop_flights" not in normalized or normalized.get("nonstop_flights") in ("", None):
         normalized["nonstop_flights"] = False
+    if "auto_request_stafftraveler" not in normalized or normalized.get("auto_request_stafftraveler") in (
+        "",
+        None,
+    ):
+        normalized["auto_request_stafftraveler"] = False
 
     trips = normalized.get("trips")
     if not isinstance(trips, list) or not trips:
@@ -1148,66 +1195,306 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
                 "password": staff_account.password,
             }
 
-        await state.log("Run started; launching three bots concurrently.")
+        await state.log("Run started; launching MyIDTravel.")
         logger.info("Run %s started (headed=%s, limit=%s)", state.id, headed, limit)
 
-        tasks = [
-            run_myidtravel(state, headed),
-            run_google_flights(state, limit, headed),
-            run_stafftraveler(state, headed),
+        myid_result = await run_myidtravel(state, headed)
+        myid_payload = myid_result.get("payload") if isinstance(myid_result, dict) else None
+        if myid_result.get("status") == "error":
+            state.status = "error"
+            state.error = myid_result.get("error") or "myidtravel error"
+            state.completed_at = datetime.utcnow()
+            save_standby_response(
+                run_id=state.id,
+                status="error",
+                output_paths={
+                    "myidtravel_screenshot": str(state.output_dir / "myidtravel_final.png"),
+                },
+                myidtravel_payload=myid_payload,
+                google_flights_payload=None,
+                stafftraveler_payload=None,
+                gemini_payload=None,
+                standby_bots_payload=None,
+                error=state.error,
+            )
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
+            await state.log("Run finished with errors.")
+            logger.info("Run %s completed status=%s", state.id, state.status)
+            await state.push_status()
+            state.done.set()
+            return
+
+        selectable_flights = [
+            flight
+            for routing in (myid_payload or [])
+            if isinstance(routing, dict)
+            for flight in (routing.get("flights") or [])
+            if isinstance(flight, dict)
         ]
+        if not selectable_flights:
+            message = "MyIDTravel: no selectable flights found for this search."
+            await _notify_thread_message(state, message)
+            await state.log(message)
+            state.status = "error"
+            state.error = "no selectable flights"
+            state.completed_at = datetime.utcnow()
+            save_standby_response(
+                run_id=state.id,
+                status="error",
+                output_paths={
+                    "myidtravel_screenshot": str(state.output_dir / "myidtravel_final.png"),
+                },
+                myidtravel_payload=myid_payload,
+                google_flights_payload=None,
+                stafftraveler_payload=None,
+                gemini_payload=None,
+                standby_bots_payload=None,
+                error=state.error,
+            )
+            update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
+            await state.push_status()
+            state.done.set()
+            return
+
+        input_class = ""
+        itinerary = state.input_data.get("itinerary", [])
+        if isinstance(itinerary, list) and itinerary:
+            input_class = (itinerary[0].get("class") or "").strip().lower()
+        class_key = "economy"
+        if "business" in input_class:
+            class_key = "business"
+        elif "first" in input_class:
+            class_key = "first"
+        elif "premium" in input_class:
+            class_key = "economy"
+
+        def _chance_to_seats(chance: str | None) -> str:
+            chance_val = (chance or "").strip().upper()
+            if chance_val == "HIGH":
+                return "9+"
+            if chance_val == "MID":
+                return "4-8"
+            if chance_val == "LOW":
+                return "0-3"
+            return ""
+
+        standby_bots_payload = []
+        for routing in myid_payload or []:
+            if not isinstance(routing, dict):
+                continue
+            routing_info = routing.get("routingInfo") or {}
+            flights = routing.get("flights") or []
+            if not isinstance(flights, list):
+                flights = []
+            payload_flights = []
+            for flight in flights:
+                if not isinstance(flight, dict):
+                    continue
+                chance_value = flight.get("chance")
+                segments = flight.get("segments") or []
+                first_segment = segments[0] if isinstance(segments, list) and segments else {}
+                segment_chance = first_segment.get("chance") if isinstance(first_segment, dict) else None
+                seat_value = _chance_to_seats(chance_value or segment_chance)
+                myid_seats = {"economy": "", "business": "", "first": ""}
+                if seat_value:
+                    myid_seats[class_key] = seat_value
+                airline = {}
+                if isinstance(first_segment, dict):
+                    airline = (
+                        first_segment.get("operatingAirline")
+                        or first_segment.get("marketingAirline")
+                        or first_segment.get("ticketingAirline")
+                        or {}
+                    )
+                from_airport = first_segment.get("from") if isinstance(first_segment, dict) else {}
+                to_airport = first_segment.get("to") if isinstance(first_segment, dict) else {}
+                departure_code = (from_airport or {}).get("code") if isinstance(from_airport, dict) else ""
+                arrival_code = (to_airport or {}).get("code") if isinstance(to_airport, dict) else ""
+                payload_flights.append(
+                    {
+                        "airline_name": airline.get("name") or "",
+                        "airline_code": airline.get("code") or "",
+                        "flight_number": first_segment.get("flightNumber")
+                        or flight.get("flightNumber")
+                        or flight.get("flight_number")
+                        or "",
+                        "aircraft": first_segment.get("aircraft") or flight.get("aircraft") or "",
+                        "departure": departure_code or first_segment.get("departure") or "",
+                        "departure_time": first_segment.get("departureTime") or "",
+                        "arrival": arrival_code or first_segment.get("arrival") or "",
+                        "arrival_time": first_segment.get("arrivalTime") or "",
+                        "duration": first_segment.get("segmentDuration") or flight.get("duration") or "",
+                        "seats": {
+                            "myidtravel": myid_seats,
+                            "google_flights": {"economy": "", "business": "", "first": ""},
+                            "stafftraveler": {"first": "", "eco": "", "ecoplus": "", "nonrev": "", "bus": ""},
+                        },
+                    }
+                )
+            if payload_flights:
+                standby_bots_payload.append(
+                    {
+                        "routingInfo": routing_info,
+                        "flights": payload_flights,
+                    }
+                )
+
+        async def _run_google(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            await state.log("[google_flights] starting")
+            return await google_flights_bot.update_selectable_flights(
+                headless=not headed,
+                input_data=state.input_data,
+                selectable_payload=payload,
+                limit=30,
+                screenshot=str(state.output_dir / "google_flights_final.png"),
+                progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
+            )
+
+        async def _run_staff(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            await state.log("[stafftraveler] starting")
+
+            if not state.stafftraveler_credentials:
+                raise ValueError("Stafftraveler credentials are required but were not found in state.")
+
+            return await stafftraveler_bot.update_selectable_flights(
+                headless=not headed,
+                selectable_payload=payload,
+                username=state.stafftraveler_credentials["username"],
+                password=state.stafftraveler_credentials["password"],
+                screenshot=str(state.output_dir / "stafftraveler_final.png"),
+                progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
+            )
+
+        def _normalize_flight_number(value: str | None) -> str:
+            return re.sub(r"\s+", "", value or "").upper()
+
+        base_payload = copy.deepcopy(standby_bots_payload)
+        stafftraveler_payload = None
+        if state.input_data.get("auto_request_stafftraveler") and state.stafftraveler_credentials:
+            await state.log("[stafftraveler] auto-request search starting")
+
+            def _variants(value: str) -> set[str]:
+                normalized = re.sub(r"\s+", "", value or "").upper()
+                if not normalized:
+                    return set()
+                match = re.match(r"([A-Z]+)(\d+)", normalized)
+                if not match:
+                    return {normalized}
+                prefix, number = match.groups()
+                trimmed = str(int(number)) if number.isdigit() else number
+                return {normalized, f"{prefix}{trimmed}"}
+
+            selectable_numbers: set[str] = set()
+            for routing in base_payload:
+                if not isinstance(routing, dict):
+                    continue
+                for flight in routing.get("flights", []):
+                    if not isinstance(flight, dict):
+                        continue
+                    number = flight.get("flight_number") or ""
+                    selectable_numbers.update(_variants(number))
+            stafftraveler_payload = await stafftraveler_bot.perform_stafftraveller_search(
+                headless=not headed,
+                screenshot=str(state.output_dir / "stafftraveler_request.png"),
+                input_data=state.input_data,
+                output_path=None,
+                selectable_numbers=selectable_numbers,
+                username=state.stafftraveler_credentials["username"],
+                password=state.stafftraveler_credentials["password"],
+                progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
+            )
+
+        tasks = [asyncio.create_task(_run_google(copy.deepcopy(base_payload)))]
+        if state.stafftraveler_credentials:
+            tasks.append(asyncio.create_task(_run_staff(copy.deepcopy(base_payload))))
+
         results = await asyncio.gather(*tasks)
+        google_payload = results[0] if results else base_payload
+        staff_payload = results[1] if len(results) > 1 else None
 
-        had_error = any(res.get("status") == "error" for res in results)
+        updated_payload = base_payload
+        staff_index: dict[str, dict[str, Any]] = {}
+        if staff_payload:
+            for routing in staff_payload:
+                for flight in routing.get("flights", []) if isinstance(routing, dict) else []:
+                    if not isinstance(flight, dict):
+                        continue
+                    number = _normalize_flight_number(flight.get("flight_number"))
+                    if number:
+                        staff_index[number] = flight
 
-        # Generate flight loads report
-        report_payload = await _run_generate_flight_loads(
-            state,
-            myid_payload=next((res.get("payload") for res in results if res.get("name") == "myidtravel"), None),
-            staff_payload=next((res.get("payload") for res in results if res.get("name") == "stafftraveler"), None),
-            google_payload=next((res.get("payload") for res in results if res.get("name") == "google_flights"), None),
-        )
+        google_index: dict[str, dict[str, Any]] = {}
+        for routing in google_payload:
+            for flight in routing.get("flights", []) if isinstance(routing, dict) else []:
+                if not isinstance(flight, dict):
+                    continue
+                number = _normalize_flight_number(flight.get("flight_number"))
+                if number:
+                    google_index[number] = flight
 
-        myid_payload = next((res.get("payload") for res in results if res.get("name") == "myidtravel"), None)
-        google_payload = next((res.get("payload") for res in results if res.get("name") == "google_flights"), None)
-        staff_payload = next((res.get("payload") for res in results if res.get("name") == "stafftraveler"), None)
-        gemini_payload = report_payload.get("gemini_payload") if report_payload else None
+        for routing in updated_payload:
+            if not isinstance(routing, dict):
+                continue
+            flights = routing.get("flights", [])
+            if not isinstance(flights, list):
+                continue
+            for flight in flights:
+                if not isinstance(flight, dict):
+                    continue
+                number = _normalize_flight_number(flight.get("flight_number"))
+                if not number:
+                    continue
+                google_flight = google_index.get(number)
+                if google_flight:
+                    flight["seats"] = google_flight.get("seats", flight.get("seats", {}))
+                    if google_flight.get("google_flights_section"):
+                        flight["google_flights_section"] = google_flight.get("google_flights_section")
+                staff_flight = staff_index.get(number)
+                if staff_flight:
+                    seats = flight.get("seats", {})
+                    staff_seats = staff_flight.get("seats", {}).get("stafftraveler")
+                    if staff_seats:
+                        seats["stafftraveler"] = staff_seats
+                        flight["seats"] = seats
+
+        gemini_payload = None
+        if config.FINAL_OUTPUT_FORMAT == "gemini":
+            try:
+                await state.log("[gemini] Generating top 5 from standby payload")
+                gemini_top, gemini_raw = await _generate_top5_from_standby_payload(
+                    state.input_data,
+                    updated_payload,
+                )
+                if gemini_raw:
+                    gemini_payload = _extract_json_from_text(gemini_raw)
+                if not gemini_top:
+                    await state.log("[gemini] No usable top 5 from Gemini")
+            except Exception as exc:
+                await state.log(f"[gemini] Failed to generate top 5: {exc}")
+
         save_standby_response(
             run_id=state.id,
-            status="error" if had_error else "completed",
+            status="completed",
             output_paths={
-                "excel": str(state.output_dir / "standby_report_multi.xlsx"),
                 "myidtravel_screenshot": str(state.output_dir / "myidtravel_final.png"),
                 "google_flights_screenshot": str(state.output_dir / "google_flights_final.png"),
                 "stafftraveler_screenshot": str(state.output_dir / "stafftraveler_final.png"),
+                "stafftraveler_request_screenshot": str(state.output_dir / "stafftraveler_request.png"),
             },
             myidtravel_payload=myid_payload,
-            google_flights_payload=google_payload,
-            stafftraveler_payload=staff_payload,
+            google_flights_payload=None,
+            stafftraveler_payload=stafftraveler_payload,
             gemini_payload=gemini_payload,
-            error=", ".join(res.get("error", "") for res in results if res.get("error")) or None,
+            standby_bots_payload=updated_payload,
+            error=None,
         )
 
-        state.status = "error" if had_error else "completed"
-        state.error = ", ".join(res.get("error", "") for res in results if res.get("error"))
+        state.status = "completed"
+        state.error = None
         state.completed_at = datetime.utcnow()
-        update_run_record(run_id=state.id, status=state.status, error=state.error, completed_at=state.completed_at)
-        await state.log("Run finished." if not had_error else "Run finished with errors.")
+        update_run_record(run_id=state.id, status=state.status, error=None, completed_at=state.completed_at)
+        await state.log("Run finished.")
         logger.info("Run %s completed status=%s", state.id, state.status)
-
-        # Get top 5 flights for Slack notification
-        top_flights = []
-        try:
-            travel_status = (state.input_data.get("travel_status") or "").strip().lower()
-            if travel_status == "bookable":
-                top_flights = report_payload.get("top_5_bookable", []) if report_payload else []
-            else:
-                top_flights = report_payload.get("top_5_standby", []) if report_payload else []
-        except Exception as e:
-            logger.error(f"Failed to load top flights for Slack: {e}")
-
-        # Send completion notification with top flights
-        await state.send_completion_slack_notification(top_flights)
 
         await state.push_status()
         state.done.set()
@@ -1955,6 +2242,38 @@ async def account_options():
     return {"accounts": get_account_options()}
 
 
+@app.get("/api/airlines")
+async def get_airlines():
+    return {"airlines": list_airlines()}
+
+
+@app.get("/api/stafftraveler-accounts")
+async def stafftraveler_accounts():
+    return {"accounts": list_stafftraveler_accounts()}
+
+
+@app.post("/api/airlines/refresh")
+async def refresh_airlines():
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await myidtravel_bot.perform_login(
+                context=context,
+                headless=True,
+                screenshot=None,
+            )
+            await scrape_airlines_helper.goto_home(page)
+            airlines = await scrape_airlines_helper.extract_airline_options(page)
+            await context.close()
+            await browser.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to refresh airlines: {exc}") from exc
+
+    save_airlines(airlines)
+    return {"airlines": airlines, "count": len(airlines)}
+
+
 @app.get("/api/slack/status")
 async def slack_status():
     """Check if Slack integration is enabled and connected"""
@@ -2027,6 +2346,288 @@ async def start_run(payload: dict[str, Any] = BODY_REQUIRED):
     return {"run_id": run_id, "status": state.status, "output_dir": str(run_dir)}
 
 
+def _normalize_flight_number(value: str | None) -> str:
+    return re.sub(r"\s+", "", value or "").upper()
+
+
+def _lookup_seat_class(value: str | None) -> str:
+    seat = (value or "").strip().lower()
+    if seat == "business":
+        return "Business"
+    if seat == "economy":
+        return "Economy"
+    return ""
+
+
+def _staff_has_flight(staff_payload: list[dict[str, Any]], flight_number: str) -> bool:
+    if not flight_number:
+        return False
+    variants = stafftraveler_bot._flight_number_variants(flight_number)
+    for entry in staff_payload or []:
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("flight_number") or entry.get("flightNumber") or ""
+        if _normalize_flight_number(number) in variants:
+            return True
+    return False
+
+
+def _merge_google_lookup_payloads(
+    economy_payload: list[dict[str, Any]],
+    business_payload: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    if economy_payload:
+        merged = copy.deepcopy(economy_payload)
+    else:
+        merged = copy.deepcopy(business_payload)
+
+    def _index(payload: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        index: dict[str, dict[str, Any]] = {}
+        for section in payload or []:
+            if not isinstance(section, dict):
+                continue
+            flights = section.get("flights") or {}
+            for bucket in ("top_flights", "other_flights"):
+                for flight in flights.get(bucket, []) if isinstance(flights, dict) else []:
+                    number = _normalize_flight_number(flight.get("flight_number"))
+                    if number:
+                        index[number] = flight
+        return index
+
+    def _set_google_class_seat(flight: dict[str, Any], class_key: str, seat_value: str | None) -> None:
+        if not seat_value:
+            return
+        seats = flight.get("seats") or {}
+        google_seats = seats.get("google_flights") or {}
+        if not google_seats.get(class_key):
+            google_seats[class_key] = seat_value
+        seats["google_flights"] = google_seats
+        flight["seats"] = seats
+
+    business_index = _index(business_payload)
+    for section in merged:
+        flights = section.get("flights") or {}
+        for bucket in ("top_flights", "other_flights"):
+            for flight in flights.get(bucket, []) if isinstance(flights, dict) else []:
+                number = _normalize_flight_number(flight.get("flight_number"))
+                if not number:
+                    continue
+                _set_google_class_seat(flight, "economy", flight.get("seats_available"))
+                business_flight = business_index.get(number)
+                if not business_flight:
+                    continue
+                _set_google_class_seat(flight, "business", business_flight.get("seats_available"))
+    return merged
+
+
+def _extract_lookup_google_flight(google_payload: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not google_payload:
+        return None
+    for entry in google_payload:
+        if not isinstance(entry, dict):
+            continue
+        flights = entry.get("flights") or {}
+        if isinstance(flights, dict):
+            top = flights.get("top_flights") or []
+            other = flights.get("other_flights") or []
+            if top:
+                return top[0]
+            if other:
+                return other[0]
+    return None
+
+
+def _set_google_class_seat(flight: dict[str, Any], class_key: str, seat_value: str | None) -> None:
+    if not seat_value:
+        return
+    seats = flight.get("seats") or {}
+    google_seats = seats.get("google_flights") or {}
+    if not google_seats.get(class_key):
+        google_seats[class_key] = seat_value
+    seats["google_flights"] = google_seats
+    flight["seats"] = seats
+
+
+async def execute_find_flight(
+    state: RunState,
+    headed: bool,
+    staff_account: StafftravelerAccount,
+    auto_request: bool,
+) -> None:
+    state.status = "running"
+    await state.push_status()
+
+    try:
+        input_data = state.input_data
+        flight_numbers = input_data.get("flight_numbers") or []
+        trips = input_data.get("trips") or []
+        itinerary = input_data.get("itinerary") or []
+        seat_choice = ""
+        if itinerary and isinstance(itinerary[0], dict):
+            seat_choice = itinerary[0].get("class", "")
+
+        legs_results: list[dict[str, Any]] = []
+        google_raw: list[dict[str, Any]] = []
+        staff_raw: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for idx, flight_number in enumerate(flight_numbers or [""]):
+            trip = trips[idx] if idx < len(trips) else (trips[0] if trips else {})
+            itin = itinerary[idx] if idx < len(itinerary) else (itinerary[0] if itinerary else {})
+            leg_input = dict(input_data)
+            leg_input["trips"] = [trip]
+            leg_input["itinerary"] = [copy.deepcopy(itin)]
+            leg_input["flight_number"] = _normalize_flight_number(flight_number)
+
+            seat_class = _lookup_seat_class(seat_choice)
+            if seat_class:
+                leg_input["itinerary"][0]["class"] = seat_class
+
+            google_payload: list[dict[str, Any]] = []
+            staff_payload: list[dict[str, Any]] = []
+            request_state: dict[str, Any] = {"attempted": False, "posted": None, "reason": None}
+
+            async def _run_google(idx, leg_input):
+                nonlocal google_payload
+                if seat_choice == "both":
+                    econ_input = copy.deepcopy(leg_input)
+                    econ_input["itinerary"][0]["class"] = "Economy"
+                    bus_input = copy.deepcopy(leg_input)
+                    bus_input["itinerary"][0]["class"] = "Business"
+                    econ_payload = await google_flights_bot.run(
+                        headless=not headed,
+                        input_path=None,
+                        output=None,
+                        limit=30,
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
+                        input_data=econ_input,
+                        progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
+                    )
+                    bus_payload = await google_flights_bot.run(
+                        headless=not headed,
+                        input_path=None,
+                        output=None,
+                        limit=30,
+                        screenshot=None,
+                        input_data=bus_input,
+                        progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
+                    )
+                    google_payload = _merge_google_lookup_payloads(econ_payload, bus_payload)
+                else:
+                    google_payload = await google_flights_bot.run(
+                        headless=not headed,
+                        input_path=None,
+                        output=None,
+                        limit=30,
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
+                        input_data=leg_input,
+                        progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
+                    )
+
+            async def _run_staff(idx, leg_input):
+                nonlocal staff_payload
+                staff_payload = await stafftraveler_bot.perform_stafftraveller_login(
+                    headless=not headed,
+                    screenshot=str(state.output_dir / f"stafftraveler_final_{idx + 1}.png"),
+                    input_data=leg_input,
+                    output_path=None,
+                    username=staff_account.username,
+                    password=staff_account.password,
+                    progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
+                )
+
+            try:
+                await asyncio.gather(_run_google(idx, leg_input), _run_staff(idx, leg_input))
+            except Exception as exc:
+                logger.exception("Lookup leg %s failed", idx + 1)
+                errors.append(str(exc))
+
+            if auto_request and not _staff_has_flight(staff_payload, flight_number):
+                request_state["attempted"] = True
+                request_meta: dict[str, Any] = {}
+                try:
+                    selectable_numbers = stafftraveler_bot._flight_number_variants(flight_number)
+                    await stafftraveler_bot.perform_stafftraveller_search(
+                        headless=not headed,
+                        screenshot=None,
+                        input_data=leg_input,
+                        output_path=None,
+                        selectable_numbers=selectable_numbers,
+                        username=staff_account.username,
+                        password=staff_account.password,
+                        progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
+                        request_state=request_meta,
+                    )
+                except Exception as exc:
+                    logger.exception("StaffTraveler auto-request failed for leg %s", idx + 1)
+                    errors.append(str(exc))
+                request_state.update(request_meta)
+
+            google_flight = _extract_lookup_google_flight(google_payload)
+            if google_flight and seat_choice in {"economy", "business"}:
+                _set_google_class_seat(google_flight, seat_choice, google_flight.get("seats_available"))
+
+            legs_results.append(
+                {
+                    "index": idx,
+                    "flight_number": flight_number,
+                    "google_flights": google_flight,
+                    "stafftraveler": staff_payload,
+                    "stafftraveler_request": request_state,
+                }
+            )
+            google_raw.append(
+                {
+                    "index": idx,
+                    "flight_number": flight_number,
+                    "results": google_payload,
+                }
+            )
+            staff_raw.append(
+                {
+                    "index": idx,
+                    "flight_number": flight_number,
+                    "results": staff_payload,
+                }
+            )
+
+        status = "error" if errors else "completed"
+        if errors:
+            await state.log(f"[lookup] Errors: {' | '.join(errors)}")
+        save_lookup_response(
+            run_id=state.id,
+            status=status,
+            output_paths={},
+            google_flights_payload=google_raw,
+            stafftraveler_payload=staff_raw,
+            lookup_payload=legs_results,
+            error=", ".join(errors) if errors else None,
+        )
+        update_run_record(
+            run_id=state.id,
+            status=status,
+            error=", ".join(errors) if errors else None,
+            completed_at=datetime.utcnow(),
+        )
+        state.status = status
+        state.error = ", ".join(errors) if errors else None
+        state.completed_at = datetime.utcnow()
+        await state.push_status()
+    except Exception as exc:
+        logger.exception("Lookup run failed")
+        state.status = "error"
+        state.error = str(exc)
+        state.completed_at = datetime.utcnow()
+        await state.log(f"[lookup] Fatal error: {exc}")
+        update_run_record(
+            run_id=state.id,
+            status="error",
+            error=str(exc),
+            completed_at=state.completed_at,
+        )
+        await state.push_status()
+
+
 @app.post("/api/find-flight")
 async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
     input_data = payload.get("input") if isinstance(payload, dict) else None
@@ -2035,6 +2636,40 @@ async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
 
     if not isinstance(input_data, dict):
         raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
+    account_id = input_data.get("account_id")
+    if not account_id:
+        raise HTTPException(status_code=400, detail="account_id is required.")
+    try:
+        account_id_int = int(account_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="account_id is invalid.") from None
+    staff_account = get_stafftraveler_account_by_id(account_id_int)
+    if not staff_account:
+        raise HTTPException(status_code=404, detail="StaffTraveler account not found.")
+
+    airline_code = str(input_data.get("airline") or "").strip()
+    if airline_code:
+        label = get_airline_label(airline_code)
+        if label:
+            input_data["airline_name"] = label
+
+    flight_numbers = input_data.get("flight_numbers")
+    if not isinstance(flight_numbers, list) or not flight_numbers:
+        raise HTTPException(status_code=400, detail="flight_numbers is required.")
+    trips = input_data.get("trips") or []
+    itinerary = input_data.get("itinerary") or []
+    for idx, number in enumerate(flight_numbers):
+        trip = trips[idx] if idx < len(trips) else {}
+        itin = itinerary[idx] if idx < len(itinerary) else {}
+        if not str(number or "").strip():
+            raise HTTPException(status_code=400, detail=f"Leg {idx + 1}: Flight number is required.")
+        if not str(trip.get("origin") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Leg {idx + 1}: Origin is required.")
+        if not str(trip.get("destination") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Leg {idx + 1}: Destination is required.")
+        if not str(itin.get("date") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Leg {idx + 1}: Date is required.")
 
     run_id = make_run_id()
     run_dir = OUTPUT_ROOT / run_id
@@ -2047,60 +2682,31 @@ async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
         run_type="lookup",
     )
 
+    state = RunState(run_id, run_dir, input_data)
+    RUNS[run_id] = state
+
     headed = bool(payload.get("headed")) if isinstance(payload, dict) else False
-
-    async def _run_google():
-        return await google_flights_bot_2.run(
-            headless=not headed,
-            input_path=None,
-            output=None,
-            limit=30,
-            screenshot=str(run_dir / "google_flights_final.png"),
-            input_data=input_data,
-        )
-
-    async def _run_staff():
-        return await stafftraveler_bot_2.perform_stafftraveller_login(
-            headless=not headed,
-            screenshot=str(run_dir / "stafftraveler_final.png"),
-            input_data=input_data,
-            output_path=None,
-        )
-
-    results = await asyncio.gather(_run_google(), _run_staff(), return_exceptions=True)
-    errors = [str(res) for res in results if isinstance(res, Exception)]
-    status = "error" if errors else "completed"
-    google_error = str(results[0]) if isinstance(results[0], Exception) else None
-    staff_error = str(results[1]) if isinstance(results[1], Exception) else None
-
-    google_payload = results[0] if not isinstance(results[0], Exception) else []
-    staff_payload = results[1] if not isinstance(results[1], Exception) else []
-
-    save_lookup_response(
-        run_id=run_id,
-        status="error" if errors else "completed",
-        output_paths={
-            "google_flights_screenshot": str(run_dir / "google_flights_final.png"),
-            "stafftraveler_screenshot": str(run_dir / "stafftraveler_final.png"),
-        },
-        google_flights_payload=google_payload if google_payload else None,
-        stafftraveler_payload=staff_payload if staff_payload else None,
-        error=", ".join(errors) if errors else None,
-    )
-    update_run_record(
-        run_id=run_id,
-        status=status,
-        error=", ".join(errors) if errors else None,
-        completed_at=datetime.utcnow(),
-    )
+    auto_request = bool(input_data.get("auto_request_stafftraveler"))
+    asyncio.create_task(execute_find_flight(state, headed, staff_account, auto_request))
 
     return {
         "run_id": run_id,
-        "status": status,
+        "status": "running",
         "output_dir": str(run_dir),
-        "google_flights": google_payload,
-        "stafftraveler": staff_payload,
-        "errors": errors,
+    }
+
+
+@app.get("/api/find-flight/{run_id}")
+async def find_flight_results(run_id: str):
+    response = get_lookup_response(run_id)
+    if not response:
+        raise HTTPException(status_code=404, detail="Lookup response not found.")
+    legs_results = response.lookup_payload if isinstance(response.lookup_payload, list) else []
+    return {
+        "run_id": run_id,
+        "status": response.status,
+        "legs_results": legs_results,
+        "error": response.error,
     }
 
 
@@ -2134,10 +2740,113 @@ async def download(run_id: str, kind: str):
         return FileResponse(path, filename=path.name)
 
     if kind == "excel":
-        path = run_dir / REPORT_XLSX
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Report Excel not found.")
-        return FileResponse(path, filename=path.name)
+        standby = get_latest_standby_response(run_id)
+        if not standby or not standby.standby_bots_payload:
+            lookup = get_lookup_response(run_id)
+            if not lookup:
+                raise HTTPException(status_code=404, detail="Report data not found.")
+            try:
+                import pandas as pd
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Pandas not available: {exc}") from exc
+
+            legs_results = lookup.lookup_payload if isinstance(lookup.lookup_payload, list) else []
+            rows: list[dict[str, Any]] = []
+            for leg in legs_results:
+                google_flight = leg.get("google_flights") or None
+                staff_flight = (leg.get("stafftraveler") or [None])[0]
+                request_state = leg.get("stafftraveler_request") or {}
+
+                rows.append(
+                    {
+                        "flight_number": leg.get("flight_number") or "",
+                        "origin": (google_flight or staff_flight or {}).get("origin", ""),
+                        "destination": (google_flight or staff_flight or {}).get("destination", ""),
+                        "departure_time": (google_flight or {}).get("depart_time") or "",
+                        "arrival_time": (google_flight or {}).get("arrival_time") or "",
+                        "airline": (google_flight or staff_flight or {}).get("airline", ""),
+                        "gf_seats": (google_flight or {}).get("seats_available") or "",
+                        "gf_stops": (google_flight or {}).get("stops") or "",
+                        "gf_emissions": (google_flight or {}).get("emissions") or "",
+                        "st_bus": (staff_flight or {}).get("seats", {}).get("bus", ""),
+                        "st_eco": (staff_flight or {}).get("seats", {}).get("eco", ""),
+                        "st_nonrev": (staff_flight or {}).get("seats", {}).get("non_rev", ""),
+                        "st_request_attempted": request_state.get("attempted"),
+                        "st_request_posted": request_state.get("posted"),
+                        "st_request_reason": request_state.get("reason"),
+                    }
+                )
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                pd.DataFrame(rows).to_excel(writer, sheet_name="Lookup", index=False)
+            output.seek(0)
+
+            headers = {"Content-Disposition": f'attachment; filename="{run_id}.xlsx"'}
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers=headers,
+            )
+
+        try:
+            import pandas as pd
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Pandas not available: {exc}") from exc
+
+        rows: list[dict[str, Any]] = []
+        for routing in standby.standby_bots_payload:
+            if not isinstance(routing, dict):
+                continue
+            routing_info = routing.get("routingInfo") or {}
+            flights = routing.get("flights") or []
+            if not isinstance(flights, list):
+                continue
+            for flight in flights:
+                if not isinstance(flight, dict):
+                    continue
+                seats = flight.get("seats") or {}
+                rows.append(
+                    {
+                        "route": f"{flight.get('departure', '')} -> {flight.get('arrival', '')}",
+                        "date": routing_info.get("departureDate") or routing_info.get("date") or "",
+                        "airline_name": flight.get("airline_name") or "",
+                        "airline_code": flight.get("airline_code") or "",
+                        "flight_number": flight.get("flight_number") or "",
+                        "aircraft": flight.get("aircraft") or "",
+                        "departure": flight.get("departure") or "",
+                        "departure_time": flight.get("departure_time") or "",
+                        "arrival": flight.get("arrival") or "",
+                        "arrival_time": flight.get("arrival_time") or "",
+                        "duration": flight.get("duration") or "",
+                        "gf_section": flight.get("google_flights_section") or "",
+                        "myid_economy": seats.get("myidtravel", {}).get("economy", ""),
+                        "myid_business": seats.get("myidtravel", {}).get("business", ""),
+                        "myid_first": seats.get("myidtravel", {}).get("first", ""),
+                        "gf_economy": seats.get("google_flights", {}).get("economy", ""),
+                        "gf_business": seats.get("google_flights", {}).get("business", ""),
+                        "gf_first": seats.get("google_flights", {}).get("first", ""),
+                        "st_first": seats.get("stafftraveler", {}).get("first", ""),
+                        "st_bus": seats.get("stafftraveler", {}).get("bus", ""),
+                        "st_eco": seats.get("stafftraveler", {}).get("eco", ""),
+                        "st_ecoplus": seats.get("stafftraveler", {}).get("ecoplus", ""),
+                        "st_nonrev": seats.get("stafftraveler", {}).get("nonrev", ""),
+                    }
+                )
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="Flights", index=False)
+            if isinstance(standby.gemini_payload, list):
+                pd.DataFrame(standby.gemini_payload).to_excel(writer, sheet_name="Top_5", index=False)
+        output.seek(0)
+
+        headers = {"Content-Disposition": f'attachment; filename="{run_id}.xlsx"'}
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
 
     if kind in BOT_OUTPUTS:
         bot_path = run_dir / BOT_OUTPUTS[kind]
@@ -2150,13 +2859,7 @@ async def download(run_id: str, kind: str):
 
 @app.get("/api/runs/{run_id}/download-report-xlsx")
 async def download_report_xlsx(run_id: str):
-    run_dir = OUTPUT_ROOT / run_id
-    if not run_dir.exists():
-        raise HTTPException(status_code=404, detail="Run not found.")
-    path = run_dir / REPORT_XLSX
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Report Excel not found.")
-    return FileResponse(path, filename=f"{run_id}.xlsx")
+    return await download(run_id, "excel")
 
 
 @app.post("/api/scrape-airlines")
