@@ -23,10 +23,10 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
-
-from models import StafftravelerAccount
 from slack_sdk.web.async_client import AsyncWebClient
 from starlette.middleware.sessions import SessionMiddleware
+
+from models import StafftravelerAccount
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True, interpolate=False)
@@ -37,12 +37,12 @@ from db import (
     create_run_record,
     ensure_data_dir,
     get_account_options,
+    get_airline_label,
     get_latest_standby_response,
     get_lookup_response,
     get_myidtravel_account,
-    get_airline_label,
-    get_stafftraveler_account_by_id,
     get_stafftraveler_account_by_employee_name,
+    get_stafftraveler_account_by_id,
     list_airlines,
     list_stafftraveler_accounts,
     save_airlines,
@@ -2322,7 +2322,6 @@ async def start_run(payload: dict[str, Any] = BODY_REQUIRED):
     limit = payload.get("limit") if isinstance(payload, dict) else None
     limit = int(limit) if isinstance(limit, int) or (isinstance(limit, str) and limit.isdigit()) else 30
     headed = bool(payload.get("headed")) if isinstance(payload, dict) else False
-    auto_request = bool(input_data.get("auto_request_stafftraveler"))
     input_data, errors = _validate_and_normalize_input(input_data)
     if errors:
         await _notify_invalid_input(errors)
@@ -2470,7 +2469,7 @@ async def execute_find_flight(
             staff_payload: list[dict[str, Any]] = []
             request_state: dict[str, Any] = {"attempted": False, "posted": None, "reason": None}
 
-            async def _run_google():
+            async def _run_google(idx, leg_input):
                 nonlocal google_payload
                 if seat_choice == "both":
                     econ_input = copy.deepcopy(leg_input)
@@ -2482,7 +2481,7 @@ async def execute_find_flight(
                         input_path=None,
                         output=None,
                         limit=30,
-                        screenshot=str(state.output_dir / f"google_flights_final_{idx+1}.png"),
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
                         input_data=econ_input,
                         progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
                     )
@@ -2502,16 +2501,16 @@ async def execute_find_flight(
                         input_path=None,
                         output=None,
                         limit=30,
-                        screenshot=str(state.output_dir / f"google_flights_final_{idx+1}.png"),
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
                         input_data=leg_input,
                         progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
                     )
 
-            async def _run_staff():
+            async def _run_staff(idx, leg_input):
                 nonlocal staff_payload
                 staff_payload = await stafftraveler_bot.perform_stafftraveller_login(
                     headless=not headed,
-                    screenshot=str(state.output_dir / f"stafftraveler_final_{idx+1}.png"),
+                    screenshot=str(state.output_dir / f"stafftraveler_final_{idx + 1}.png"),
                     input_data=leg_input,
                     output_path=None,
                     username=staff_account.username,
@@ -2520,7 +2519,7 @@ async def execute_find_flight(
                 )
 
             try:
-                await asyncio.gather(_run_google(), _run_staff())
+                await asyncio.gather(_run_google(idx, leg_input), _run_staff(idx, leg_input))
             except Exception as exc:
                 logger.exception("Lookup leg %s failed", idx + 1)
                 errors.append(str(exc))
@@ -2622,7 +2621,7 @@ async def find_flight(payload: dict[str, Any] = BODY_REQUIRED):
     try:
         account_id_int = int(account_id)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="account_id is invalid.")
+        raise HTTPException(status_code=400, detail="account_id is invalid.") from None
     staff_account = get_stafftraveler_account_by_id(account_id_int)
     if not staff_account:
         raise HTTPException(status_code=404, detail="StaffTraveler account not found.")
