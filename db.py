@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.engine import make_url
 from sqlmodel import Session, col, create_engine, desc, select
 
-from models import LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
+from models import Airline, LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
 
 load_dotenv()
 
@@ -120,6 +121,7 @@ def save_lookup_response(
     output_paths: dict[str, Any],
     google_flights_payload: Any | None,
     stafftraveler_payload: Any | None,
+    lookup_payload: Any | None,
     error: str | None = None,
 ) -> None:
     try:
@@ -129,6 +131,7 @@ def save_lookup_response(
                 status=status,
                 google_flights_payload=google_flights_payload,
                 stafftraveler_payload=stafftraveler_payload,
+                lookup_payload=lookup_payload,
                 output_paths=output_paths,
                 error=error,
                 created_at=datetime.utcnow(),
@@ -138,6 +141,25 @@ def save_lookup_response(
     except Exception as exc:
         logger.warning("Failed to persist lookup response for %s: %s", run_id, exc)
 
+
+def get_lookup_response(run_id: str) -> LookupBotResponse | None:
+    try:
+        with Session(engine) as session:
+            statement = select(LookupBotResponse).where(LookupBotResponse.run_id == run_id)
+            return session.exec(statement).first()
+    except Exception as exc:
+        logger.warning("Failed to fetch lookup response for %s: %s", run_id, exc)
+        return None
+
+
+def get_run_input(run_id: str) -> dict[str, Any] | None:
+    try:
+        with Session(engine) as session:
+            run = session.get(Run, run_id)
+            return run.input_payload if run else None
+    except Exception as exc:
+        logger.warning("Failed to fetch run input for %s: %s", run_id, exc)
+        return None
 
 def get_account_options() -> list[dict[str, Any]]:
     try:
@@ -179,6 +201,77 @@ def get_latest_standby_response(run_id: str) -> StandbyBotResponse | None:
             return session.exec(statement).first()
     except Exception as exc:
         logger.warning("Failed to fetch standby response for %s: %s", run_id, exc)
+        return None
+
+
+def save_airlines(airlines: list[dict[str, Any]]) -> None:
+    try:
+        with Session(engine) as session:
+            session.exec(sa_delete(Airline))  # type: ignore[arg-type]
+            for item in airlines:
+                code = str(item.get("value") or item.get("code") or "").strip()
+                label = str(item.get("label") or code).strip()
+                if not code:
+                    continue
+                session.add(
+                    Airline(
+                        code=code,
+                        label=label,
+                        disabled=bool(item.get("disabled", False)),
+                        created_at=datetime.utcnow(),
+                    )
+                )
+            session.commit()
+    except Exception as exc:
+        logger.warning("Failed to save airlines: %s", exc)
+
+
+def list_airlines() -> list[dict[str, Any]]:
+    try:
+        with Session(engine) as session:
+            statement = select(Airline).order_by(Airline.label)
+            rows = session.exec(statement).all()
+        return [
+            {"value": row.code, "label": row.label, "disabled": row.disabled}
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.warning("Failed to list airlines: %s", exc)
+        return []
+
+
+def get_airline_label(code: str) -> str | None:
+    if not code:
+        return None
+    try:
+        with Session(engine) as session:
+            statement = select(Airline.label).where(Airline.code == code)
+            row = session.exec(statement).first()
+        return row[0] if row else None
+    except Exception as exc:
+        logger.warning("Failed to fetch airline label for %s: %s", code, exc)
+        return None
+
+
+def list_stafftraveler_accounts() -> list[dict[str, Any]]:
+    try:
+        with Session(engine) as session:
+            statement = select(StafftravelerAccount.id, StafftravelerAccount.employee_name).order_by(
+                StafftravelerAccount.employee_name
+            )
+            rows = session.exec(statement).all()
+        return [{"id": row[0], "employee_name": row[1]} for row in rows]
+    except Exception as exc:
+        logger.warning("Failed to list stafftraveler accounts: %s", exc)
+        return []
+
+
+def get_stafftraveler_account_by_id(account_id: int) -> StafftravelerAccount | None:
+    try:
+        with Session(engine) as session:
+            return session.get(StafftravelerAccount, account_id)
+    except Exception as exc:
+        logger.warning("Failed to fetch stafftraveler account %s: %s", account_id, exc)
         return None
 
 
