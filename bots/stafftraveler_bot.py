@@ -692,6 +692,7 @@ async def perform_stafftraveller_search(
     username: str | None = None,
     password: str | None = None,
     progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
+    request_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     logger.info("Starting StaffTraveler search headless=%s", headless)
     username = username or os.getenv("ST_USERNAME")
@@ -819,16 +820,24 @@ async def perform_stafftraveller_search(
                 try:
                     if await request_btn.is_disabled():
                         await _notify_message("StaffTraveler: request button disabled (monthly limit reached).")
+                        if request_state is not None:
+                            request_state.update({"posted": False, "reason": "disabled"})
                     else:
                         await request_btn.click()
                         await page.wait_for_timeout(10000)
+                        if request_state is not None:
+                            request_state.update({"posted": True, "reason": None})
                 except Exception:
+                    if request_state is not None and "posted" not in request_state:
+                        request_state.update({"posted": False, "reason": "error"})
                     pass
-                try:
-                    await page.reload()
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    await page.wait_for_timeout(1500)
+            elif request_state is not None:
+                request_state.update({"posted": False, "reason": "missing"})
+            try:
+                await page.reload()
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                await page.wait_for_timeout(1500)
 
         if screenshot:
             try:

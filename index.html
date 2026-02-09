@@ -68,78 +68,64 @@
             </div>
             <form id="find-flight-form">
               <div class="field-grid">
-                <label>Flight Number
-                  <input type="text" id="find-flight-code" placeholder="e.g. SQ495" required>
-                </label>
-                <label>Flight Type
-                  <select id="find-flight-type" required>
-                    <option value="one-way" selected>One-way</option>
-                    <option value="round-trip">Round trip</option>
-                    <option value="multiple-legs">Multiple legs / Multi-city</option>
-                  </select>
-                </label>
-                <label>Airline
-                  <select id="find-flight-airline">
+                <label>StaffTraveler Account
+                  <select id="find-flight-account" required>
                     <option value="">Loading...</option>
                   </select>
                 </label>
-                <label style="flex-direction: row; align-items: center; gap: 10px;">
-                  <input id="find-flight-nonstop" type="checkbox">
-                  <span>Non-stop only</span>
-                </label>
               </div>
-              <div class="leg-header">
-                <div>
-                  <div class="leg-title">Leg 1</div>
-                  <div class="leg-subtitle">Optional details to refine the search.</div>
+              <div id="find-flight-dependent" style="display: none;">
+                <div class="field-grid" style="margin-top: 12px;">
+                  <div class="leg-grid">
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                      <label>Flight Type
+                        <select id="find-flight-type" required>
+                          <option value="one-way" selected>One-way</option>
+                          <option value="round-trip">Round trip</option>
+                          <option value="multiple-legs">Multiple legs / Multi-city</option>
+                        </select>
+                      </label>
+                      <label style="flex-direction: row; align-items: center; gap: 10px;">
+                        <input id="find-flight-nonstop" type="checkbox">
+                        <span>Non-stop only</span>
+                      </label>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                      <label>Airline
+                        <select id="find-flight-airline">
+                          <option value="">Loading...</option>
+                        </select>
+                      </label>
+                      <label style="flex-direction: row; align-items: center; gap: 10px;">
+                        <input id="find-flight-auto-request" type="checkbox">
+                        <span>Auto request on StaffTraveler</span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div class="leg-grid">
-                <label>Origin
-                  <input type="text" id="find-flight-origin" placeholder="e.g. DXB" required>
-                </label>
-                <label>Destination
-                  <input type="text" id="find-flight-destination" placeholder="e.g. SIN" required>
-                </label>
-                <label>Date
-                  <input type="date" id="find-flight-date" required>
-                </label>
-                <label>Time
-                  <select id="find-flight-time" required>
-                    <option value="00:00">00:00</option>
-                    <option value="01:00">01:00</option>
-                    <option value="02:00">02:00</option>
-                    <option value="03:00">03:00</option>
-                    <option value="04:00">04:00</option>
-                    <option value="05:00">05:00</option>
-                    <option value="06:00">06:00</option>
-                    <option value="07:00">07:00</option>
-                    <option value="08:00">08:00</option>
-                    <option value="09:00">09:00</option>
-                    <option value="10:00">10:00</option>
-                    <option value="11:00">11:00</option>
-                    <option value="12:00">12:00</option>
-                    <option value="13:00">13:00</option>
-                    <option value="14:00">14:00</option>
-                    <option value="15:00">15:00</option>
-                    <option value="16:00">16:00</option>
-                    <option value="17:00">17:00</option>
-                    <option value="18:00">18:00</option>
-                    <option value="19:00">19:00</option>
-                    <option value="20:00">20:00</option>
-                    <option value="21:00">21:00</option>
-                    <option value="22:00">22:00</option>
-                    <option value="23:00">23:00</option>
-                  </select>
-                </label>
-                <label>Class
-                  <select id="find-flight-class" required>
-                    <option value="Economy">Economy</option>
-                    <option value="Premium Economy">Premium Economy</option>
-                    <option value="Business">Business</option>
-                    <option value="First">First</option>
-                  </select>
-                </label>
+                <div class="leg-header">
+                  <div>
+                    <div class="leg-title">Legs</div>
+                    <div class="leg-subtitle">Each leg requires a flight number.</div>
+                  </div>
+                  <button class="ghost" type="button" id="find-flight-add-leg">+ Add Leg</button>
+                </div>
+                <div id="find-flight-legs" class="legs"></div>
+                <div class="leg-header" style="margin-top: 10px;">
+                  <div>
+                    <div class="leg-title">Class</div>
+                    <div class="leg-subtitle">Seat class used for the lookup.</div>
+                  </div>
+                </div>
+                <div class="field-grid" style="margin-top: 12px;">
+                  <label>Class
+                    <select id="find-flight-class" required>
+                      <option value="economy">Economy Only</option>
+                      <option value="business">Business Only</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </label>
+                </div>
               </div>
               <div class="actions">
                 <div style="flex:1"></div>
@@ -151,7 +137,50 @@
         <div class="right-panel">
           <div class="panel">
             <div class="status-row">
-              <h3>Flight Details</h3>
+              <h3>Bot Progress</h3>
+              <div style="flex: 1;"></div>
+              <span class="badge" id="find-status-label">waiting</span>
+            </div>
+            <div class="bot-progress">
+              <div class="bot-card" data-bot="find-google_flights">
+                <div class="bot-header">
+                  <span class="bot-icon">
+                    <img src="/static/images/gf-icon.webp" alt="Google Flights">
+                  </span>
+                  <span class="bot-name">Google Flights</span>
+                  <span class="bot-status" id="bot-status-find-google_flights">idle</span>
+                </div>
+                <div class="bot-bar">
+                  <div class="bot-bar-fill" id="bot-progress-find-google_flights" style="width: 0%;"></div>
+                </div>
+                <div class="bot-caption" id="bot-caption-find-google_flights">Waiting for run.</div>
+              </div>
+              <div class="bot-card" data-bot="find-stafftraveler">
+                <div class="bot-header">
+                  <span class="bot-icon">
+                    <img src="/static/images/st-icon.webp" alt="StaffTraveler">
+                  </span>
+                  <span class="bot-name">StaffTraveler</span>
+                  <span class="bot-status" id="bot-status-find-stafftraveler">idle</span>
+                </div>
+                <div class="bot-bar">
+                  <div class="bot-bar-fill" id="bot-progress-find-stafftraveler" style="width: 0%;"></div>
+                </div>
+                <div class="bot-caption" id="bot-caption-find-stafftraveler">Waiting for run.</div>
+              </div>
+            </div>
+          </div>
+          <div class="panel" style="margin-top: 16px;">
+            <div class="status-row">
+              <h3>Seat Availability</h3>
+              <div style="flex: 1;"></div>
+              <button class="ghost" type="button" id="download-find-xlsx" disabled>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                </svg>
+                Download Excel
+              </button>
             </div>
             <div id="find-flight-results" class="empty-state">
               Run a search to load flight details.

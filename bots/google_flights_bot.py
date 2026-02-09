@@ -617,10 +617,11 @@ async def _scrape_results(
     flight_number: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Scrape results grouped into top_flights using the tabpanel inside the main
-    results container. Falls back to a flat list if sections are not found.
+    Scrape results grouped into top_flights and other_flights using the tabpanel
+    inside the main results container. Falls back to a flat list if sections are not found.
     """
     top_flights: list[dict[str, Any]] = []
+    other_flights: list[dict[str, Any]] = []
     adults = MAX_ADULTS
 
     while True:
@@ -641,6 +642,7 @@ async def _scrape_results(
             panel = None
 
         found_top = None
+        found_other = None
         if panel:
             sections = panel.locator("> div")
             sec_count = await sections.count()
@@ -665,6 +667,8 @@ async def _scrape_results(
 
                 if re.search(r"top flight", label, re.I):
                     found_top = items
+                elif re.search(r"other flight", label, re.I):
+                    found_other = items
                 elif found_top is None and await items.count():
                     found_top = items
 
@@ -676,17 +680,27 @@ async def _scrape_results(
                 flight_number=flight_number,
                 seats_available=str(adults),
             )
-            if not flight_number or top_flights:
-                break
+        if found_other:
+            logger.info("Found %s other flights (adults=%s)", await found_other.count(), adults)
+            other_flights = await _scrape_section(
+                found_other,
+                limit,
+                flight_number=flight_number,
+                seats_available=str(adults),
+            )
+
+        if not flight_number or top_flights or other_flights:
+            break
 
         if adults <= 1:
             top_flights = []
+            other_flights = []
             break
 
         adults = await _decrement_adults(page, adults)
         await _wait_for_results(page, timeout_ms=12000)
 
-    return {"top_flights": top_flights}
+    return {"top_flights": top_flights, "other_flights": other_flights}
 
 
 async def update_selectable_flights(
@@ -1661,6 +1675,11 @@ async def run(
             await _apply_nonstop_filter(page)
             logger.info("Applied nonstop filter")
 
+        airline_name = (resolved_input.get("airline_name") or "").strip()
+        if airline_name:
+            await _apply_airline_filter(page, {airline_name})
+            logger.info("Applied airline filter for %s", airline_name)
+
         try:
             await _wait_for_results(page, timeout_ms=15000)
         except Exception:
@@ -1674,11 +1693,12 @@ async def run(
         if progress_cb:
             await progress_cb(85, "parsed")
         logger.info(
-            "Scraped flights: top=%s",
+            "Scraped flights: top=%s other=%s",
             len(flights.get("top_flights", [])),
+            len(flights.get("other_flights", [])),
         )
         if not any(flights.values()):
-            flights = {"top_flights": []}
+            flights = {"top_flights": [], "other_flights": []}
         results.append(
             {
                 "type": "multi-city" if flight_type == "multiple-legs" and len(legs) > 1 else flight_type,
