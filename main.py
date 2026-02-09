@@ -2395,6 +2395,16 @@ def _merge_google_lookup_payloads(
                         index[number] = flight
         return index
 
+    def _set_google_class_seat(flight: dict[str, Any], class_key: str, seat_value: str | None) -> None:
+        if not seat_value:
+            return
+        seats = flight.get("seats") or {}
+        google_seats = seats.get("google_flights") or {}
+        if not google_seats.get(class_key):
+            google_seats[class_key] = seat_value
+        seats["google_flights"] = google_seats
+        flight["seats"] = seats
+
     business_index = _index(business_payload)
     for section in merged:
         flights = section.get("flights") or {}
@@ -2403,14 +2413,11 @@ def _merge_google_lookup_payloads(
                 number = _normalize_flight_number(flight.get("flight_number"))
                 if not number:
                     continue
+                _set_google_class_seat(flight, "economy", flight.get("seats_available"))
                 business_flight = business_index.get(number)
                 if not business_flight:
                     continue
-                seats = flight.get("seats") or {}
-                business_seats = (business_flight.get("seats") or {}).get("google_flights") or {}
-                if business_seats:
-                    seats.setdefault("google_flights", {}).update(business_seats)
-                    flight["seats"] = seats
+                _set_google_class_seat(flight, "business", business_flight.get("seats_available"))
     return merged
 
 
@@ -2429,6 +2436,17 @@ def _extract_lookup_google_flight(google_payload: list[dict[str, Any]]) -> dict[
             if other:
                 return other[0]
     return None
+
+
+def _set_google_class_seat(flight: dict[str, Any], class_key: str, seat_value: str | None) -> None:
+    if not seat_value:
+        return
+    seats = flight.get("seats") or {}
+    google_seats = seats.get("google_flights") or {}
+    if not google_seats.get(class_key):
+        google_seats[class_key] = seat_value
+    seats["google_flights"] = google_seats
+    flight["seats"] = seats
 
 
 async def execute_find_flight(
@@ -2545,11 +2563,15 @@ async def execute_find_flight(
                     errors.append(str(exc))
                 request_state.update(request_meta)
 
+            google_flight = _extract_lookup_google_flight(google_payload)
+            if google_flight and seat_choice in {"economy", "business"}:
+                _set_google_class_seat(google_flight, seat_choice, google_flight.get("seats_available"))
+
             legs_results.append(
                 {
                     "index": idx,
                     "flight_number": flight_number,
-                    "google_flights": _extract_lookup_google_flight(google_payload),
+                    "google_flights": google_flight,
                     "stafftraveler": staff_payload,
                     "stafftraveler_request": request_state,
                 }

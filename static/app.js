@@ -675,21 +675,18 @@ function renderFindFlightCard(data, title, isStaff) {
       </div>
     `;
   } else {
+    const googleSeats = data.seats?.google_flights || {};
     loadsHtml = `
       <div class="loads-container">
-        <span class="section-label">Commercial Details</span>
+        <span class="section-label">Google Seats</span>
         <div class="loads-grid">
           <div class="load-pill">
-            <span>SEATS</span>
-            <strong>${data.seats_available || "-"}</strong>
+            <span>ECONOMY</span>
+            <strong class="load-high">${googleSeats.economy || "-"}</strong>
           </div>
           <div class="load-pill">
-            <span>STOPS</span>
-            <strong>${data.stops || "-"}</strong>
-          </div>
-          <div class="load-pill">
-            <span>EMISSIONS</span>
-            <strong>${data.emissions || "-"}</strong>
+            <span>BUSINESS</span>
+            <strong class="load-low">${googleSeats.business || "-"}</strong>
           </div>
         </div>
       </div>
