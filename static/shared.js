@@ -79,29 +79,7 @@ const timeOptions = Array.from(
   { length: 24 },
   (_, h) => `${h.toString().padStart(2, "0")}:00`
 );
-const isoToMmddyyyy = (val) => {
-  if (!val) return "";
-  if (val.includes("/")) return val;
-  const parts = val.split("-");
-  if (parts.length === 3) {
-    return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${
-      parts[0]
-    }`;
-  }
-  return val;
-};
-const mmddyyyyToIso = (val) => {
-  if (!val) return "";
-  if (val.includes("-")) return val;
-  const parts = val.split("/");
-  if (parts.length === 3) {
-    return `${parts[2]}-${parts[0].padStart(2, "0")}-${parts[1].padStart(
-      2,
-      "0"
-    )}`;
-  }
-  return val;
-};
+const { isoToMmddyyyy, mmddyyyyToIso, showToast } = window.GlobalpassCommon || {};
 
 let ws;
 let currentRunId = null;
@@ -320,23 +298,6 @@ function updateProgressFromLog(message) {
   }
   if (message.toLowerCase().includes("finished") || message.toLowerCase().includes("completed")) {
     setBotProgress(botKey, "done");
-  }
-}
-
-function showToast(message, type = "error") {
-  if (window.Toastify) {
-    Toastify({
-      text: message,
-      duration: 4500,
-      gravity: "top",
-      position: "right",
-      close: true,
-      style: {
-        background: type === "error" ? "#d65b4a" : "#2e8b57",
-      },
-    }).showToast();
-  } else {
-    appendLog(message);
   }
 }
 
@@ -644,6 +605,58 @@ function renderFindFlightCard(data, title, isStaff) {
     `;
   }
 
+  if (data.economy || data.business) {
+    const econ = data.economy || null;
+    const bus = data.business || null;
+    const base = econ || bus || {};
+    const airline = base.airline || "Unknown Airline";
+    const flightNumber = base.flight_number || base.flightNumber || "N/A";
+    const origin = base.origin || "N/A";
+    const destination = base.destination || "N/A";
+    const depart = base.depart_time || base.departure_time || base.time || "N/A";
+    const arrive = base.arrival_time || base.arrival || "N/A";
+    const aircraft = base.aircraft || "N/A";
+    const duration = base.duration || "N/A";
+    return `
+      <div class="dashboard-card">
+        <div class="status-header">
+          <div class="flight-meta">
+            <span class="airline-tag">${title}: ${airline} · ${flightNumber}</span>
+            <span class="on-time">● ON TIME</span>
+          </div>
+          <div class="timeline">
+            <div class="node">
+              <h2>${origin}</h2>
+              <p>${depart}</p>
+            </div>
+            <div class="line"></div>
+            <div class="node">
+              <h2>${destination}</h2>
+              <p>${arrive}</p>
+            </div>
+          </div>
+        </div>
+        <div class="loads-container">
+          <span class="section-label">Google Seats</span>
+          <div class="loads-grid">
+            <div class="load-pill">
+              <span>ECONOMY</span>
+              <strong class="load-high">${econ?.seats_available || "-"}</strong>
+            </div>
+            <div class="load-pill">
+              <span>BUSINESS</span>
+              <strong class="load-low">${bus?.seats_available || "-"}</strong>
+            </div>
+          </div>
+        </div>
+        <div class="footer-info">
+          <span><strong>Aircraft:</strong> ${aircraft}</span>
+          <span><strong>Duration:</strong> ${duration}</span>
+        </div>
+      </div>
+    `;
+  }
+
   const airline = data.airline || "Unknown Airline";
   const flightNumber = data.flight_number || data.flightNumber || "N/A";
   const origin = data.origin || "N/A";
@@ -661,7 +674,7 @@ function renderFindFlightCard(data, title, isStaff) {
         <div class="loads-grid">
           <div class="load-pill">
             <span>BUSINESS</span>
-            <strong class="load-low">${data.seats.bus || "-"}</strong>
+            <strong class="load-low">${data.seats.bus || data.seats.business || "-"}</strong>
           </div>
           <div class="load-pill">
             <span>ECONOMY</span>
@@ -669,24 +682,31 @@ function renderFindFlightCard(data, title, isStaff) {
           </div>
           <div class="load-pill">
             <span>NON-REV</span>
-            <strong>${data.seats.non_rev || "-"}</strong>
+            <strong>${data.seats.non_rev || data.seats.nonrev || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>ECONOMY+</span>
+            <strong>${data.seats.eco_plus || data.seats.ecoplus || "-"}</strong>
           </div>
         </div>
       </div>
     `;
   } else {
     const googleSeats = data.seats?.google_flights || {};
+    const hasBuckets = googleSeats.economy || googleSeats.business || googleSeats.first;
+    const singleSeat = data.seats_available || "";
+    const singleClass = (data.class || "").toUpperCase();
     loadsHtml = `
       <div class="loads-container">
         <span class="section-label">Google Seats</span>
         <div class="loads-grid">
           <div class="load-pill">
             <span>ECONOMY</span>
-            <strong class="load-high">${googleSeats.economy || "-"}</strong>
+            <strong class="load-high">${hasBuckets ? googleSeats.economy || "-" : singleClass === "ECONOMY" ? singleSeat || "-" : "-"}</strong>
           </div>
           <div class="load-pill">
             <span>BUSINESS</span>
-            <strong class="load-low">${googleSeats.business || "-"}</strong>
+            <strong class="load-low">${hasBuckets ? googleSeats.business || "-" : singleClass === "BUSINESS" ? singleSeat || "-" : "-"}</strong>
           </div>
         </div>
       </div>
@@ -885,8 +905,8 @@ async function fetchFindFlightResults(runId) {
 
   findFlightResults.innerHTML = legsResults
     .map((leg, idx) => {
-      const googleFlight = leg.google_flights || null;
-      const staffFlight = (leg.stafftraveler || [])[0] || null;
+  const googleFlight = leg.google_flights || null;
+  const staffFlight = (leg.stafftraveler || [])[0] || null;
       return `
         <div class="leg-card">
           <div class="leg-row">
@@ -1511,97 +1531,115 @@ async function loadAirlines() {
   }
 }
 
-downloadXlsxBtn.addEventListener("click", () => download("excel"));
-findDownloadXlsxBtn?.addEventListener("click", downloadFindXlsx);
-form.addEventListener("submit", startRun);
-findFlightForm?.addEventListener("submit", startFindFlight);
-document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
-flightTypeSelect.addEventListener("change", ensureLegsMatchType);
-accountSelect?.addEventListener("change", setAccountDependentVisibility);
-accountSelect?.addEventListener("change", () => {
-  const accountId = Number(accountSelect?.value || 0);
-  const account = accountById.get(accountId);
-  accountTravellers = Array.isArray(account?.travellers) ? account.travellers : [];
-  selectedTravellers = [];
-  if (toggleTravellersBtn) {
-    toggleTravellersBtn.textContent = " + ";
-  }
-  if (travellerList) {
-    travellerList.style.display = "none";
-  }
-  renderTravellerList();
-});
-document.getElementById("find-flight-type")?.addEventListener("change", ensureFindFlightLegsMatchType);
-findFlightAccountSelect?.addEventListener("change", setFindFlightDependentVisibility);
-findFlightAddLeg?.addEventListener("click", () => {
-  findFlightLegs.push(createFindFlightLeg());
-  renderFindFlightLegs();
-});
-addFlightBtn.addEventListener("click", () => {
-  if (flightTypeSelect.value !== "multiple-legs") return;
-  legs.push(createLeg());
-  renderLegs();
-});
-toggleTravelPartnersBtn?.addEventListener("click", () => {
-  if (!accountSelect?.value) {
-    showToast("Select an account first.");
+function initShared() {
+  if (window.__globalpassSharedInit) {
     return;
   }
-  openTravelPartnersModal();
-});
-addTravelPartnerBtn?.addEventListener("click", () => {
-  if (travelPartners.length >= 2) {
-    showToast("You can add up to 2 travel partners.");
-    return;
+  window.__globalpassSharedInit = true;
+  loadAirlines();
+  const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  if (headedToggle && !isDevHost) {
+    headedToggle.style.display = "none";
   }
-  travelPartners.push(createPartner());
-  renderTravelPartners();
-});
-toggleTravellersBtn?.addEventListener("click", () => {
-  if (!travellerList) return;
-  const isHidden = travellerList.style.display === "none";
-  travellerList.style.display = isHidden ? "grid" : "none";
-  if (toggleTravellersBtn) {
-    toggleTravellersBtn.textContent = " + ";
+  if (findFlightHeadedToggle && !isDevHost) {
+    findFlightHeadedToggle.style.display = "none";
   }
-});
-if (travelPartnersModal && modalCloseButtons.length) {
-  modalCloseButtons.forEach((btn) => {
-    btn.addEventListener("click", closeTravelPartnersModal);
-  });
-  travelPartnersModal.addEventListener("click", (event) => {
-    if (event.target === travelPartnersModal) {
-      closeTravelPartnersModal();
-    }
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && travelPartnersModal.classList.contains("is-open")) {
-      closeTravelPartnersModal();
-    }
-  });
+  if (findFlightToggle && findFlightContent && defaultContent) {
+    findFlightToggle.addEventListener("click", () => {
+      const showFind = findFlightContent.style.display === "none";
+      findFlightContent.style.display = showFind ? "block" : "none";
+      defaultContent.style.display = showFind ? "none" : "grid";
+      findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
+    });
+  }
 }
 
-ensureLegsMatchType();
-renderLegs();
-renderTravelPartners();
-renderTravellerList();
-loadAirlines();
-loadAccounts();
-loadStafftravelerAccounts();
-ensureFindFlightLegsMatchType();
-const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-if (headedToggle && !isDevHost) {
-  headedToggle.style.display = "none";
-}
-if (findFlightHeadedToggle && !isDevHost) {
-  findFlightHeadedToggle.style.display = "none";
-}
-if (findFlightToggle && findFlightContent && defaultContent) {
-  findFlightToggle.addEventListener("click", () => {
-    const showFind = findFlightContent.style.display === "none";
-    findFlightContent.style.display = showFind ? "block" : "none";
-    defaultContent.style.display = showFind ? "none" : "grid";
-    findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
+function initStandardRun() {
+  downloadXlsxBtn.addEventListener("click", () => download("excel"));
+  form.addEventListener("submit", startRun);
+  flightTypeSelect.addEventListener("change", ensureLegsMatchType);
+  accountSelect?.addEventListener("change", setAccountDependentVisibility);
+  accountSelect?.addEventListener("change", () => {
+    const accountId = Number(accountSelect?.value || 0);
+    const account = accountById.get(accountId);
+    accountTravellers = Array.isArray(account?.travellers) ? account.travellers : [];
+    selectedTravellers = [];
+    if (toggleTravellersBtn) {
+      toggleTravellersBtn.textContent = " + ";
+    }
+    if (travellerList) {
+      travellerList.style.display = "none";
+    }
+    renderTravellerList();
   });
+  addFlightBtn.addEventListener("click", () => {
+    if (flightTypeSelect.value !== "multiple-legs") return;
+    legs.push(createLeg());
+    renderLegs();
+  });
+  toggleTravelPartnersBtn?.addEventListener("click", () => {
+    if (!accountSelect?.value) {
+      showToast("Select an account first.");
+      return;
+    }
+    openTravelPartnersModal();
+  });
+  addTravelPartnerBtn?.addEventListener("click", () => {
+    if (travelPartners.length >= 2) {
+      showToast("You can add up to 2 travel partners.");
+      return;
+    }
+    travelPartners.push(createPartner());
+    renderTravelPartners();
+  });
+  toggleTravellersBtn?.addEventListener("click", () => {
+    if (!travellerList) return;
+    const isHidden = travellerList.style.display === "none";
+    travellerList.style.display = isHidden ? "grid" : "none";
+    if (toggleTravellersBtn) {
+      toggleTravellersBtn.textContent = " + ";
+    }
+  });
+  if (travelPartnersModal && modalCloseButtons.length) {
+    modalCloseButtons.forEach((btn) => {
+      btn.addEventListener("click", closeTravelPartnersModal);
+    });
+    travelPartnersModal.addEventListener("click", (event) => {
+      if (event.target === travelPartnersModal) {
+        closeTravelPartnersModal();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && travelPartnersModal.classList.contains("is-open")) {
+        closeTravelPartnersModal();
+      }
+    });
+  }
+
+  ensureLegsMatchType();
+  renderLegs();
+  renderTravelPartners();
+  renderTravellerList();
+  loadAccounts();
+  appendLog("Ready. Fill the form to run the bots.");
 }
-appendLog("Ready. Fill the form to run the bots.");
+
+function initFindFlight() {
+  findDownloadXlsxBtn?.addEventListener("click", downloadFindXlsx);
+  findFlightForm?.addEventListener("submit", startFindFlight);
+  document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
+  document.getElementById("find-flight-type")?.addEventListener("change", ensureFindFlightLegsMatchType);
+  findFlightAccountSelect?.addEventListener("change", setFindFlightDependentVisibility);
+  findFlightAddLeg?.addEventListener("click", () => {
+    findFlightLegs.push(createFindFlightLeg());
+    renderFindFlightLegs();
+  });
+  ensureFindFlightLegsMatchType();
+  loadStafftravelerAccounts();
+}
+
+window.Globalpass = {
+  initShared,
+  initStandardRun,
+  initFindFlight,
+};

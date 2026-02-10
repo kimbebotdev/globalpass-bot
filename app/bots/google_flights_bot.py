@@ -16,8 +16,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
-import config
-from bots.myidtravel_bot import read_input
+from app import config
+from app.bots.myidtravel_bot import read_input
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
@@ -262,6 +262,18 @@ def _normalize_flight_number(value: str | None) -> str:
     return re.sub(r"\s+", "", value or "").upper()
 
 
+def _flight_number_variants(value: str | None) -> set[str]:
+    normalized = _normalize_flight_number(value)
+    if not normalized:
+        return set()
+    match = re.match(r"([A-Z]+)(\d+)", normalized)
+    if not match:
+        return {normalized}
+    prefix, number = match.groups()
+    trimmed = str(int(number)) if number.isdigit() else number
+    return {normalized, f"{prefix}{trimmed}"}
+
+
 def _seat_class_key(seat_class: str) -> str:
     seat = (seat_class or "").strip().lower()
     if "business" in seat:
@@ -341,8 +353,9 @@ async def _scrape_section(
             if extra_details:
                 flight_data.update(extra_details)
             if flight_number:
-                scraped_number = (flight_data.get("flight_number") or "").replace(" ", "").upper()
-                if scraped_number == flight_number.upper():
+                target_variants = _flight_number_variants(flight_number)
+                scraped_variants = _flight_number_variants(flight_data.get("flight_number"))
+                if scraped_variants & target_variants:
                     results.append(flight_data)
             else:
                 results.append(flight_data)

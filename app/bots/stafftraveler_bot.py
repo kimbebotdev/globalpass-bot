@@ -17,8 +17,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
-import config
-from bots.myidtravel_bot import read_input
+from app import config
+from app.bots.myidtravel_bot import read_input
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
@@ -344,7 +344,7 @@ async def _expand_all_flight_cards(page) -> None:
 
 async def _scrape_all_flights(page, flight_number: str | None = None) -> list[dict]:
     results = []
-    target_number = (flight_number or "").replace(" ", "").upper()
+    target_variants = _flight_number_variants(flight_number)
     groups = page.locator("div.css-ceo8c9")
     group_count = await groups.count()
     for i in range(group_count):
@@ -468,9 +468,9 @@ async def _scrape_all_flights(page, flight_number: str | None = None) -> list[di
                 "arrival_time": arrive_time,
                 "seats": seats,
             }
-            if target_number:
-                scraped_number = flight_number.replace(" ", "").upper()
-                if scraped_number == target_number:
+            if target_variants:
+                scraped_variants = _flight_number_variants(flight_number)
+                if scraped_variants & target_variants:
                     return [flight_record]
             else:
                 results.append(flight_record)
