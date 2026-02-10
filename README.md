@@ -37,7 +37,3 @@ Each run writes to `outputs/YYYYMMDD_HHMMSS/`:
 - `standby_report_multi.json`, `standby_report_multi.xlsx`
 - `input.json` copy plus any per-bot state (e.g., `stafftraveler_auth_state.json`)
 - `gemini_response.txt` and `gemini_response.json` when Gemini is enabled
-
-### Legacy helpers (optional)
-- `login.py` / `fill_form.py` for standalone myIDTravel flows.
-- `scrape_airlines.py` still runnable directly, but the scraper is also exposed via `POST /api/scrape-airlines`.

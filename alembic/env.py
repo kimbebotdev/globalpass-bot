@@ -8,7 +8,6 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 import app.models  # noqa: F401
-
 from alembic import context
 
 load_dotenv()

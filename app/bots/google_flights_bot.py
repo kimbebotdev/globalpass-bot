@@ -17,7 +17,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
 from app import config
-from bots.myidtravel_bot import read_input
+from app.bots.myidtravel_bot import read_input
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")

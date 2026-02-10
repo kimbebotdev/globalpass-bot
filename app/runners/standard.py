@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from app import config
+from app.bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 from app.db import (
     get_myidtravel_account,
     get_stafftraveler_account_by_employee_name,
@@ -20,7 +21,6 @@ from app.state import RUN_SEMAPHORE
 from app.utils import build_route_string, extract_json_from_text
 from app.validation import validate_and_normalize_input
 from app.ws import RunState
-from bots import google_flights_bot, myidtravel_bot, stafftraveler_bot
 
 logger = logging.getLogger("globalpass")
 

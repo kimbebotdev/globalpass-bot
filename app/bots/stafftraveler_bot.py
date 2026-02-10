@@ -18,7 +18,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
 from app import config
-from bots.myidtravel_bot import read_input
+from app.bots.myidtravel_bot import read_input
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:

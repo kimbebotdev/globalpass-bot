@@ -6,7 +6,7 @@ from typing import Any
 from playwright.async_api import Page, async_playwright
 
 from app import config
-from bots import myidtravel_bot
+from app.bots import myidtravel_bot
 
 AIRLINE_OUTPUT = Path("airlines.json")
 ORIGIN_LOOKUP_OUTPUT = Path("origin_lookup_sample.json")

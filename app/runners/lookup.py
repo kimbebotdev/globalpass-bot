@@ -5,9 +5,9 @@ import re
 from datetime import datetime
 from typing import Any
 
+from app.bots import google_flights_bot, stafftraveler_bot
 from app.db import save_lookup_response, update_run_record
 from app.ws import RunState
-from bots import google_flights_bot, stafftraveler_bot
 
 logger = logging.getLogger("globalpass")
 
@@ -109,11 +109,15 @@ async def execute_find_flight(
             if seat_class:
                 leg_input["itinerary"][0]["class"] = seat_class
 
-            google_payload: list[dict[str, Any]] = []
+            google_payload: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] = []
             staff_payload: list[dict[str, Any]] = []
             request_state: dict[str, Any] = {"attempted": False, "posted": None, "reason": None}
 
-            async def _run_google():
+            async def _run_google(
+                leg_input=leg_input,
+                idx=idx,
+                seat_choice=seat_choice,
+            ):
                 nonlocal google_payload
                 if seat_choice == "both":
                     econ_input = copy.deepcopy(leg_input)
@@ -125,7 +129,7 @@ async def execute_find_flight(
                         input_path=None,
                         output=None,
                         limit=30,
-                        screenshot=str(state.output_dir / f"google_flights_final_{idx+1}.png"),
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
                         input_data=econ_input,
                         progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
                     )
@@ -145,16 +149,19 @@ async def execute_find_flight(
                         input_path=None,
                         output=None,
                         limit=30,
-                        screenshot=str(state.output_dir / f"google_flights_final_{idx+1}.png"),
+                        screenshot=str(state.output_dir / f"google_flights_final_{idx + 1}.png"),
                         input_data=leg_input,
                         progress_cb=lambda percent, status: state.progress("google_flights", percent, status),
                     )
 
-            async def _run_staff():
+            async def _run_staff(
+                leg_input=leg_input,
+                idx=idx,
+            ):
                 nonlocal staff_payload
                 staff_payload = await stafftraveler_bot.perform_stafftraveller_login(
                     headless=not headed,
-                    screenshot=str(state.output_dir / f"stafftraveler_final_{idx+1}.png"),
+                    screenshot=str(state.output_dir / f"stafftraveler_final_{idx + 1}.png"),
                     input_data=leg_input,
                     output_path=None,
                     username=staff_account.username,

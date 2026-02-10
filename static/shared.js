@@ -79,29 +79,7 @@ const timeOptions = Array.from(
   { length: 24 },
   (_, h) => `${h.toString().padStart(2, "0")}:00`
 );
-const isoToMmddyyyy = (val) => {
-  if (!val) return "";
-  if (val.includes("/")) return val;
-  const parts = val.split("-");
-  if (parts.length === 3) {
-    return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${
-      parts[0]
-    }`;
-  }
-  return val;
-};
-const mmddyyyyToIso = (val) => {
-  if (!val) return "";
-  if (val.includes("-")) return val;
-  const parts = val.split("/");
-  if (parts.length === 3) {
-    return `${parts[2]}-${parts[0].padStart(2, "0")}-${parts[1].padStart(
-      2,
-      "0"
-    )}`;
-  }
-  return val;
-};
+const { isoToMmddyyyy, mmddyyyyToIso, showToast } = window.GlobalpassCommon || {};
 
 let ws;
 let currentRunId = null;
@@ -320,23 +298,6 @@ function updateProgressFromLog(message) {
   }
   if (message.toLowerCase().includes("finished") || message.toLowerCase().includes("completed")) {
     setBotProgress(botKey, "done");
-  }
-}
-
-function showToast(message, type = "error") {
-  if (window.Toastify) {
-    Toastify({
-      text: message,
-      duration: 4500,
-      gravity: "top",
-      position: "right",
-      close: true,
-      style: {
-        background: type === "error" ? "#d65b4a" : "#2e8b57",
-      },
-    }).showToast();
-  } else {
-    appendLog(message);
   }
 }
 
@@ -1570,97 +1531,115 @@ async function loadAirlines() {
   }
 }
 
-downloadXlsxBtn.addEventListener("click", () => download("excel"));
-findDownloadXlsxBtn?.addEventListener("click", downloadFindXlsx);
-form.addEventListener("submit", startRun);
-findFlightForm?.addEventListener("submit", startFindFlight);
-document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
-flightTypeSelect.addEventListener("change", ensureLegsMatchType);
-accountSelect?.addEventListener("change", setAccountDependentVisibility);
-accountSelect?.addEventListener("change", () => {
-  const accountId = Number(accountSelect?.value || 0);
-  const account = accountById.get(accountId);
-  accountTravellers = Array.isArray(account?.travellers) ? account.travellers : [];
-  selectedTravellers = [];
-  if (toggleTravellersBtn) {
-    toggleTravellersBtn.textContent = " + ";
-  }
-  if (travellerList) {
-    travellerList.style.display = "none";
-  }
-  renderTravellerList();
-});
-document.getElementById("find-flight-type")?.addEventListener("change", ensureFindFlightLegsMatchType);
-findFlightAccountSelect?.addEventListener("change", setFindFlightDependentVisibility);
-findFlightAddLeg?.addEventListener("click", () => {
-  findFlightLegs.push(createFindFlightLeg());
-  renderFindFlightLegs();
-});
-addFlightBtn.addEventListener("click", () => {
-  if (flightTypeSelect.value !== "multiple-legs") return;
-  legs.push(createLeg());
-  renderLegs();
-});
-toggleTravelPartnersBtn?.addEventListener("click", () => {
-  if (!accountSelect?.value) {
-    showToast("Select an account first.");
+function initShared() {
+  if (window.__globalpassSharedInit) {
     return;
   }
-  openTravelPartnersModal();
-});
-addTravelPartnerBtn?.addEventListener("click", () => {
-  if (travelPartners.length >= 2) {
-    showToast("You can add up to 2 travel partners.");
-    return;
+  window.__globalpassSharedInit = true;
+  loadAirlines();
+  const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  if (headedToggle && !isDevHost) {
+    headedToggle.style.display = "none";
   }
-  travelPartners.push(createPartner());
-  renderTravelPartners();
-});
-toggleTravellersBtn?.addEventListener("click", () => {
-  if (!travellerList) return;
-  const isHidden = travellerList.style.display === "none";
-  travellerList.style.display = isHidden ? "grid" : "none";
-  if (toggleTravellersBtn) {
-    toggleTravellersBtn.textContent = " + ";
+  if (findFlightHeadedToggle && !isDevHost) {
+    findFlightHeadedToggle.style.display = "none";
   }
-});
-if (travelPartnersModal && modalCloseButtons.length) {
-  modalCloseButtons.forEach((btn) => {
-    btn.addEventListener("click", closeTravelPartnersModal);
-  });
-  travelPartnersModal.addEventListener("click", (event) => {
-    if (event.target === travelPartnersModal) {
-      closeTravelPartnersModal();
-    }
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && travelPartnersModal.classList.contains("is-open")) {
-      closeTravelPartnersModal();
-    }
-  });
+  if (findFlightToggle && findFlightContent && defaultContent) {
+    findFlightToggle.addEventListener("click", () => {
+      const showFind = findFlightContent.style.display === "none";
+      findFlightContent.style.display = showFind ? "block" : "none";
+      defaultContent.style.display = showFind ? "none" : "grid";
+      findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
+    });
+  }
 }
 
-ensureLegsMatchType();
-renderLegs();
-renderTravelPartners();
-renderTravellerList();
-loadAirlines();
-loadAccounts();
-loadStafftravelerAccounts();
-ensureFindFlightLegsMatchType();
-const isDevHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-if (headedToggle && !isDevHost) {
-  headedToggle.style.display = "none";
-}
-if (findFlightHeadedToggle && !isDevHost) {
-  findFlightHeadedToggle.style.display = "none";
-}
-if (findFlightToggle && findFlightContent && defaultContent) {
-  findFlightToggle.addEventListener("click", () => {
-    const showFind = findFlightContent.style.display === "none";
-    findFlightContent.style.display = showFind ? "block" : "none";
-    defaultContent.style.display = showFind ? "none" : "grid";
-    findFlightToggle.textContent = showFind ? "Search Flights" : "Search Flight Number";
+function initStandardRun() {
+  downloadXlsxBtn.addEventListener("click", () => download("excel"));
+  form.addEventListener("submit", startRun);
+  flightTypeSelect.addEventListener("change", ensureLegsMatchType);
+  accountSelect?.addEventListener("change", setAccountDependentVisibility);
+  accountSelect?.addEventListener("change", () => {
+    const accountId = Number(accountSelect?.value || 0);
+    const account = accountById.get(accountId);
+    accountTravellers = Array.isArray(account?.travellers) ? account.travellers : [];
+    selectedTravellers = [];
+    if (toggleTravellersBtn) {
+      toggleTravellersBtn.textContent = " + ";
+    }
+    if (travellerList) {
+      travellerList.style.display = "none";
+    }
+    renderTravellerList();
   });
+  addFlightBtn.addEventListener("click", () => {
+    if (flightTypeSelect.value !== "multiple-legs") return;
+    legs.push(createLeg());
+    renderLegs();
+  });
+  toggleTravelPartnersBtn?.addEventListener("click", () => {
+    if (!accountSelect?.value) {
+      showToast("Select an account first.");
+      return;
+    }
+    openTravelPartnersModal();
+  });
+  addTravelPartnerBtn?.addEventListener("click", () => {
+    if (travelPartners.length >= 2) {
+      showToast("You can add up to 2 travel partners.");
+      return;
+    }
+    travelPartners.push(createPartner());
+    renderTravelPartners();
+  });
+  toggleTravellersBtn?.addEventListener("click", () => {
+    if (!travellerList) return;
+    const isHidden = travellerList.style.display === "none";
+    travellerList.style.display = isHidden ? "grid" : "none";
+    if (toggleTravellersBtn) {
+      toggleTravellersBtn.textContent = " + ";
+    }
+  });
+  if (travelPartnersModal && modalCloseButtons.length) {
+    modalCloseButtons.forEach((btn) => {
+      btn.addEventListener("click", closeTravelPartnersModal);
+    });
+    travelPartnersModal.addEventListener("click", (event) => {
+      if (event.target === travelPartnersModal) {
+        closeTravelPartnersModal();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && travelPartnersModal.classList.contains("is-open")) {
+        closeTravelPartnersModal();
+      }
+    });
+  }
+
+  ensureLegsMatchType();
+  renderLegs();
+  renderTravelPartners();
+  renderTravellerList();
+  loadAccounts();
+  appendLog("Ready. Fill the form to run the bots.");
 }
-appendLog("Ready. Fill the form to run the bots.");
+
+function initFindFlight() {
+  findDownloadXlsxBtn?.addEventListener("click", downloadFindXlsx);
+  findFlightForm?.addEventListener("submit", startFindFlight);
+  document.getElementById("find-flight-search")?.addEventListener("click", startFindFlight);
+  document.getElementById("find-flight-type")?.addEventListener("change", ensureFindFlightLegsMatchType);
+  findFlightAccountSelect?.addEventListener("change", setFindFlightDependentVisibility);
+  findFlightAddLeg?.addEventListener("click", () => {
+    findFlightLegs.push(createFindFlightLeg());
+    renderFindFlightLegs();
+  });
+  ensureFindFlightLegsMatchType();
+  loadStafftravelerAccounts();
+}
+
+window.Globalpass = {
+  initShared,
+  initStandardRun,
+  initFindFlight,
+};
