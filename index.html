@@ -10,6 +10,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="apple-touch-icon" sizes="180x180" href="static/images/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="static/images/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="static/images/favicon-16x16.png">
+  <link rel="manifest" href="static/images/site.webmanifest">
 </head>
 
 <body>
@@ -43,8 +48,8 @@
         </button>
         <form method="post" action="/logout" class="logout-form">
           <button type="submit" class="logout-button" aria-label="Logout">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 2v10"></path>
               <path d="M7.5 4.9a7 7 0 1 0 9 0"></path>
             </svg>
@@ -194,18 +199,18 @@
       <!-- Left Panel - Flight Details -->
       <div class="left-panel">
         <div class="panel">
-            <div class="status-row">
-              <h3>Flight Details</h3>
-              <span class="pill pending" id="status-pill">idle</span>
-              <span class="badge" id="run-id"></span>
-              <div style="flex: 1;"></div>
-              <label class="switch-container" id="headed-toggle">
-                <span class="switch-label">Show Browser</span>
-                <input type="checkbox" id="headed" class="switch-input">
-                <span class="switch-slider"></span>
-              </label>
-            </div>
-            <form id="run-form">
+          <div class="status-row">
+            <h3>Flight Details</h3>
+            <span class="pill pending" id="status-pill">idle</span>
+            <span class="badge" id="run-id"></span>
+            <div style="flex: 1;"></div>
+            <label class="switch-container" id="headed-toggle">
+              <span class="switch-label">Show Browser</span>
+              <input type="checkbox" id="headed" class="switch-input">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <form id="run-form">
             <div id="form-input-section">
               <div class="leg-header">
                 <div>
@@ -284,7 +289,8 @@
                             </div>
                             <button class="ghost" type="button" id="toggle-travellers"> + </button>
                           </div>
-                          <div id="traveller-list" class="traveller-list" style="display: none; margin-top: 15px;"></div>
+                          <div id="traveller-list" class="traveller-list" style="display: none; margin-top: 15px;">
+                          </div>
                         </div>
                         <div class="traveller-selector" style="margin-top: 12px;">
                           <div class="leg-header compact-header">
@@ -383,7 +389,7 @@
             </div>
           </div>
         </div>
-        
+
       </div>
     </div>
   </div>

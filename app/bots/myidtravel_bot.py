@@ -41,6 +41,7 @@ async def _notify_message(message: str) -> None:
         except Exception:
             pass
 
+
 def read_input(path: str) -> dict[str, Any]:
     input_path = Path(path)
     if not input_path.exists():
@@ -557,9 +558,7 @@ async def apply_traveller_selection(page, travellers: list[dict]) -> None:
             if not await dropdown.count():
                 fallback_dropdowns = page.locator(config.TRAVELLER_SALUTATION_TOGGLE)
                 dropdown = (
-                    fallback_dropdowns.nth(idx)
-                    if await fallback_dropdowns.count() > idx
-                    else fallback_dropdowns.first
+                    fallback_dropdowns.nth(idx) if await fallback_dropdowns.count() > idx else fallback_dropdowns.first
                 )
             if await dropdown.count():
                 try:
@@ -700,9 +699,7 @@ async def fill_multiple_legs(page, trips: list[dict], itinerary: list[dict]) -> 
             await type_and_select_in_container(origin_field, config.ORIGIN_SELECTOR, origin)
         if dest:
             dest_field = (
-                dest_inputs.nth(idx)
-                if await dest_inputs.count() > idx
-                else page.locator(config.DEST_SELECTOR).first
+                dest_inputs.nth(idx) if await dest_inputs.count() > idx else page.locator(config.DEST_SELECTOR).first
             )
             await type_and_select_in_container(dest_field, config.DEST_SELECTOR, dest)
 
@@ -854,15 +851,12 @@ async def fill_form_from_input(
     if travel_status:
         try:
             selector_count = await page.locator(config.TRAVEL_STATUS_SELECTOR).count()
-            fallback_count = await page.locator(
-                "input[placeholder*='Travel' i], input[aria-label*='Travel' i]"
-            ).count()
+            fallback_count = await page.locator("input[placeholder*='Travel' i], input[aria-label*='Travel' i]").count()
             logger.info(
                 "Travel status locator counts: selector=%s fallback=%s",
                 selector_count,
                 fallback_count,
             )
-            await page.screenshot(path="debug_travel_status.png", full_page=True)
         except Exception as exc:
             logger.info("Travel status debug failed: %s", exc)
         await select_react_select(page, config.TRAVEL_STATUS_SELECTOR, travel_status, placeholder_hint="Travel status")

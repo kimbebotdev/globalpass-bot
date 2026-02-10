@@ -6,7 +6,6 @@ __pycache__
 
 # Ignore auto generated files
 *.json
-*.png
 *.xlsx
 *.csv
 
@@ -15,6 +14,7 @@ outputs
 env
 json
 data
+output
 
 AGENTS.md
 .ruff_cache
