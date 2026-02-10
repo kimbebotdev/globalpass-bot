@@ -2,6 +2,13 @@
 
 Welcome! This guide is for using the Globalpass Bot web interface only. It covers how to run searches, what each field means, and what to expect in the results.
 
+## Admin Login
+
+Before using the app, you must log in with the admin account:
+
+- **Username**: `admin`
+- **Password**: `$GlobalPass!!`
+
 ## Two Ways to Use the App
 
 You can use the app in two modes:

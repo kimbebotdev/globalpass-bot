@@ -97,7 +97,7 @@ async def perform_login(
     await page.click("input[type=submit][value='Login']")
 
     # Wait for navigation to complete
-    await page.wait_for_load_state("networkidle", timeout=15000)
+    await page.wait_for_load_state("networkidle", timeout=60000)
 
     # Check if we're still on a login page or if error is visible
     current_url = page.url
