@@ -15,7 +15,7 @@ Runs three bots (myIDTravel, Google Flights, StaffTraveler) concurrently, stream
 
 ### Run the server
 ```
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 ```
 Open `http://localhost:8000` to use the UI (served from `index.html` + `/static`).
 

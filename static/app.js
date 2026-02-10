@@ -644,6 +644,58 @@ function renderFindFlightCard(data, title, isStaff) {
     `;
   }
 
+  if (data.economy || data.business) {
+    const econ = data.economy || null;
+    const bus = data.business || null;
+    const base = econ || bus || {};
+    const airline = base.airline || "Unknown Airline";
+    const flightNumber = base.flight_number || base.flightNumber || "N/A";
+    const origin = base.origin || "N/A";
+    const destination = base.destination || "N/A";
+    const depart = base.depart_time || base.departure_time || base.time || "N/A";
+    const arrive = base.arrival_time || base.arrival || "N/A";
+    const aircraft = base.aircraft || "N/A";
+    const duration = base.duration || "N/A";
+    return `
+      <div class="dashboard-card">
+        <div class="status-header">
+          <div class="flight-meta">
+            <span class="airline-tag">${title}: ${airline} · ${flightNumber}</span>
+            <span class="on-time">● ON TIME</span>
+          </div>
+          <div class="timeline">
+            <div class="node">
+              <h2>${origin}</h2>
+              <p>${depart}</p>
+            </div>
+            <div class="line"></div>
+            <div class="node">
+              <h2>${destination}</h2>
+              <p>${arrive}</p>
+            </div>
+          </div>
+        </div>
+        <div class="loads-container">
+          <span class="section-label">Google Seats</span>
+          <div class="loads-grid">
+            <div class="load-pill">
+              <span>ECONOMY</span>
+              <strong class="load-high">${econ?.seats_available || "-"}</strong>
+            </div>
+            <div class="load-pill">
+              <span>BUSINESS</span>
+              <strong class="load-low">${bus?.seats_available || "-"}</strong>
+            </div>
+          </div>
+        </div>
+        <div class="footer-info">
+          <span><strong>Aircraft:</strong> ${aircraft}</span>
+          <span><strong>Duration:</strong> ${duration}</span>
+        </div>
+      </div>
+    `;
+  }
+
   const airline = data.airline || "Unknown Airline";
   const flightNumber = data.flight_number || data.flightNumber || "N/A";
   const origin = data.origin || "N/A";
@@ -661,7 +713,7 @@ function renderFindFlightCard(data, title, isStaff) {
         <div class="loads-grid">
           <div class="load-pill">
             <span>BUSINESS</span>
-            <strong class="load-low">${data.seats.bus || "-"}</strong>
+            <strong class="load-low">${data.seats.bus || data.seats.business || "-"}</strong>
           </div>
           <div class="load-pill">
             <span>ECONOMY</span>
@@ -669,24 +721,31 @@ function renderFindFlightCard(data, title, isStaff) {
           </div>
           <div class="load-pill">
             <span>NON-REV</span>
-            <strong>${data.seats.non_rev || "-"}</strong>
+            <strong>${data.seats.non_rev || data.seats.nonrev || "-"}</strong>
+          </div>
+          <div class="load-pill">
+            <span>ECONOMY+</span>
+            <strong>${data.seats.eco_plus || data.seats.ecoplus || "-"}</strong>
           </div>
         </div>
       </div>
     `;
   } else {
     const googleSeats = data.seats?.google_flights || {};
+    const hasBuckets = googleSeats.economy || googleSeats.business || googleSeats.first;
+    const singleSeat = data.seats_available || "";
+    const singleClass = (data.class || "").toUpperCase();
     loadsHtml = `
       <div class="loads-container">
         <span class="section-label">Google Seats</span>
         <div class="loads-grid">
           <div class="load-pill">
             <span>ECONOMY</span>
-            <strong class="load-high">${googleSeats.economy || "-"}</strong>
+            <strong class="load-high">${hasBuckets ? googleSeats.economy || "-" : singleClass === "ECONOMY" ? singleSeat || "-" : "-"}</strong>
           </div>
           <div class="load-pill">
             <span>BUSINESS</span>
-            <strong class="load-low">${googleSeats.business || "-"}</strong>
+            <strong class="load-low">${hasBuckets ? googleSeats.business || "-" : singleClass === "BUSINESS" ? singleSeat || "-" : "-"}</strong>
           </div>
         </div>
       </div>
@@ -885,8 +944,8 @@ async function fetchFindFlightResults(runId) {
 
   findFlightResults.innerHTML = legsResults
     .map((leg, idx) => {
-      const googleFlight = leg.google_flights || null;
-      const staffFlight = (leg.stafftraveler || [])[0] || null;
+  const googleFlight = leg.google_flights || null;
+  const staffFlight = (leg.stafftraveler || [])[0] || null;
       return `
         <div class="leg-card">
           <div class="leg-row">

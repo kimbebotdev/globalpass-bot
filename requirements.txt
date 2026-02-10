@@ -12,3 +12,4 @@ alembic
 bcrypt
 itsdangerous
 python-multipart
+ruff

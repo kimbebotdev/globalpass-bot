@@ -49,7 +49,7 @@ if [ "$APP_ENV" = "production" ]; then
     echo -e "${BLUE}Starting in PRODUCTION mode${NC}"
     echo -e "${YELLOW}Using $WORKERS workers${NC}\n"
     
-    uvicorn main:app \
+    uvicorn app.main:app \
         --host ${API_HOST:-0.0.0.0} \
         --port ${API_PORT:-8000} \
         --workers ${WORKERS:-4} \
@@ -59,7 +59,7 @@ else
     echo -e "${BLUE}Starting in DEVELOPMENT mode${NC}"
     echo -e "${YELLOW}Hot reload enabled${NC}\n"
     
-    uvicorn main:app \
+    uvicorn app.main:app \
         --host ${API_HOST:-0.0.0.0} \
         --port ${API_PORT:-8000} \
         --reload \

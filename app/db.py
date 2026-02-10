@@ -9,7 +9,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy.engine import make_url
 from sqlmodel import Session, col, create_engine, desc, select
 
-from models import Airline, LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
+from app.models import Airline, LookupBotResponse, MyidtravelAccount, Run, StafftravelerAccount, StandbyBotResponse
 
 load_dotenv()
 

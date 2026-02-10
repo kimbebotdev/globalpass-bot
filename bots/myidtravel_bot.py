@@ -4,17 +4,19 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any
 
 from dotenv import load_dotenv
-from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
-import config
+from app import config
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -24,10 +26,10 @@ if not logging.getLogger().handlers:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-_notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+_notify_callback: Callable[[str], Awaitable[None]] | None = None
 
 
-def set_notifier(callback: Optional[Callable[[str], Awaitable[None]]]) -> None:
+def set_notifier(callback: Callable[[str], Awaitable[None]] | None) -> None:
     global _notify_callback
     _notify_callback = callback
 
@@ -39,7 +41,7 @@ async def _notify_message(message: str) -> None:
         except Exception:
             pass
 
-def read_input(path: str) -> Dict[str, Any]:
+def read_input(path: str) -> dict[str, Any]:
     input_path = Path(path)
     if not input_path.exists():
         raise SystemExit(f"Input file not found: {input_path}")
@@ -143,7 +145,11 @@ async def type_and_select_in_container(container_or_field, selector: str, value:
     field = container_or_field
     # If we were given a container (e.g., Page or Locator that is not the input), try to find the input inside.
     try:
-        is_input_like = hasattr(container_or_field, "fill") and hasattr(container_or_field, "press") and not hasattr(container_or_field, "goto")
+        is_input_like = (
+            hasattr(container_or_field, "fill")
+            and hasattr(container_or_field, "press")
+            and not hasattr(container_or_field, "goto")
+        )
     except Exception:
         is_input_like = False
     if not is_input_like and hasattr(container_or_field, "locator"):
@@ -176,7 +182,9 @@ async def type_and_select_in_container(container_or_field, selector: str, value:
 async def select_react_select(page, selector: str, value: str, placeholder_hint: str | None = None) -> None:
     input_el = page.locator(selector).first
     if not await input_el.count() and placeholder_hint:
-        input_el = page.locator(f'input[placeholder*="{placeholder_hint}" i], input[aria-label*="{placeholder_hint}" i]').first
+        input_el = page.locator(
+            f'input[placeholder*="{placeholder_hint}" i], input[aria-label*="{placeholder_hint}" i]'
+        ).first
     if not await input_el.count():
         return
     await input_el.click()
@@ -189,6 +197,7 @@ async def select_react_select(page, selector: str, value: str, placeholder_hint:
     except PlaywrightTimeout:
         await input_el.press("Enter")
 
+
 async def trigger_nonstop_flights(page, selector: str, value: str) -> None:
     container = page.locator(selector).first
     switch = container.locator(".switch-handle").first
@@ -196,6 +205,7 @@ async def trigger_nonstop_flights(page, selector: str, value: str) -> None:
 
     if is_active:
         await switch.click()
+
 
 async def select_flight_type(page, flight_type: str) -> None:
     """Click the flight type tab based on input (one-way, round-trip, multiple-legs)."""
@@ -265,7 +275,11 @@ async def _fill_input(locator, value: str) -> bool:
         current = await handle.input_value()
         if current.strip() != value.strip():
             await handle.evaluate(
-                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                (
+                    "(el, val) => { el.value = val; "
+                    "el.dispatchEvent(new Event('input', { bubbles: true })); "
+                    "el.dispatchEvent(new Event('change', { bubbles: true })); }"
+                ),
                 value,
             )
     except Exception:
@@ -330,7 +344,11 @@ async def _fill_time_input(handle, value: str) -> bool:
 
         # Wait for dropdown to appear
         try:
-            await page_obj.wait_for_selector('div[role="menu"][id*="dropdown-menu"].show', timeout=2000, state="visible")
+            await page_obj.wait_for_selector(
+                'div[role="menu"][id*="dropdown-menu"].show',
+                timeout=2000,
+                state="visible",
+            )
         except Exception:
             logger.debug("Dropdown menu did not appear for time input")
             # Try fallback: direct input
@@ -404,7 +422,11 @@ async def _fill_time_fallback(handle, value: str) -> bool:
         current = await handle.input_value()
         if current.strip() != value.strip():
             await handle.evaluate(
-                "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
+                (
+                    "(el, val) => { el.value = val; "
+                    "el.dispatchEvent(new Event('input', { bubbles: true })); "
+                    "el.dispatchEvent(new Event('change', { bubbles: true })); }"
+                ),
                 value,
             )
         return True
@@ -421,10 +443,20 @@ async def fill_leg_fields(container, date_val: str, time_val: str, class_val: st
         date_input = _input_locator(container, config.DATE_SELECTOR.lstrip("#"), placeholder_hint="Date")
         await _fill_input(date_input, date_val)
     if time_val:
-        time_input = _input_locator(container, config.TIME_SELECTOR.lstrip("#"), name_val="Time", placeholder_hint="Time")
+        time_input = _input_locator(
+            container,
+            config.TIME_SELECTOR.lstrip("#"),
+            name_val="Time",
+            placeholder_hint="Time",
+        )
         await _fill_time_input(time_input, time_val)
     if class_val:
-        class_input = _input_locator(container, config.CLASS_SELECTOR.lstrip("#"), name_val="Class", placeholder_hint="Class")
+        class_input = _input_locator(
+            container,
+            config.CLASS_SELECTOR.lstrip("#"),
+            name_val="Class",
+            placeholder_hint="Class",
+        )
         await _fill_input(class_input, class_val)
 
 
@@ -523,7 +555,12 @@ async def apply_traveller_selection(page, travellers: list[dict]) -> None:
             dropdowns = parent.locator(config.TRAVELLER_SALUTATION_TOGGLE)
             dropdown = dropdowns.nth(idx) if await dropdowns.count() > idx else dropdowns.first
             if not await dropdown.count():
-                dropdown = page.locator(config.TRAVELLER_SALUTATION_TOGGLE).nth(idx) if await page.locator(config.TRAVELLER_SALUTATION_TOGGLE).count() > idx else page.locator(config.TRAVELLER_SALUTATION_TOGGLE).first
+                fallback_dropdowns = page.locator(config.TRAVELLER_SALUTATION_TOGGLE)
+                dropdown = (
+                    fallback_dropdowns.nth(idx)
+                    if await fallback_dropdowns.count() > idx
+                    else fallback_dropdowns.first
+                )
             if await dropdown.count():
                 try:
                     await dropdown.click()
@@ -542,6 +579,7 @@ async def apply_traveller_selection(page, travellers: list[dict]) -> None:
 
         await page.wait_for_timeout(500)
 
+
 async def add_travel_partners(page, partners: list[dict]) -> None:
     """Add travel partners using the modal form."""
     if not partners:
@@ -551,7 +589,7 @@ async def add_travel_partners(page, partners: list[dict]) -> None:
     if not await add_btn.count():
         return
 
-    for idx, partner in enumerate(partners):
+    for _idx, partner in enumerate(partners):
         try:
             await add_btn.click()
             await page.wait_for_timeout(300)
@@ -654,10 +692,18 @@ async def fill_multiple_legs(page, trips: list[dict], itinerary: list[dict]) -> 
         origin = trip.get("origin", "")
         dest = trip.get("destination", "")
         if origin:
-            origin_field = origin_inputs.nth(idx) if await origin_inputs.count() > idx else page.locator(config.ORIGIN_SELECTOR).first
+            origin_field = (
+                origin_inputs.nth(idx)
+                if await origin_inputs.count() > idx
+                else page.locator(config.ORIGIN_SELECTOR).first
+            )
             await type_and_select_in_container(origin_field, config.ORIGIN_SELECTOR, origin)
         if dest:
-            dest_field = dest_inputs.nth(idx) if await dest_inputs.count() > idx else page.locator(config.DEST_SELECTOR).first
+            dest_field = (
+                dest_inputs.nth(idx)
+                if await dest_inputs.count() > idx
+                else page.locator(config.DEST_SELECTOR).first
+            )
             await type_and_select_in_container(dest_field, config.DEST_SELECTOR, dest)
 
         leg_data = itinerary[idx] if idx < len(itinerary) else {}
@@ -668,6 +714,7 @@ async def fill_multiple_legs(page, trips: list[dict], itinerary: list[dict]) -> 
             leg_data.get("time", ""),
             leg_data.get("class", ""),
         )
+
 
 async def click_traveller_continue(page) -> None:
     """Click the traveller modal continue button if present."""
@@ -761,7 +808,7 @@ async def submit_form_and_capture(
 
 async def fill_form_from_input(
     page,
-    input_data: Dict[str, Any],
+    input_data: dict[str, Any],
     output_path: Path | None = None,
     progress_cb: Callable[[int, str], Awaitable[None]] | None = None,
 ) -> Any | None:

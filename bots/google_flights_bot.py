@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.append(str(BASE_DIR))
 
-import config
+from app import config
 from bots.myidtravel_bot import read_input
 
 # Output path for captured Google Flights results.
