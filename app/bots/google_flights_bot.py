@@ -340,6 +340,7 @@ async def _scrape_section(
     results: list[dict[str, Any]] = []
     count = min(await items.count(), limit)
 
+    target_variants = _flight_number_variants(flight_number) if flight_number else set()
     for idx in range(count):
         card = items.nth(idx)
         try:
@@ -352,11 +353,19 @@ async def _scrape_section(
             )
             if extra_details:
                 flight_data.update(extra_details)
-            if flight_number:
-                target_variants = _flight_number_variants(flight_number)
+            if target_variants:
                 scraped_variants = _flight_number_variants(flight_data.get("flight_number"))
                 if scraped_variants & target_variants:
                     results.append(flight_data)
+                    continue
+                if not scraped_variants:
+                    try:
+                        card_text = await card.inner_text()
+                    except Exception:
+                        card_text = ""
+                    normalized_text = re.sub(r"\s+", "", card_text or "").upper()
+                    if any(variant in normalized_text for variant in target_variants):
+                        results.append(flight_data)
             else:
                 results.append(flight_data)
         except Exception as e:
@@ -822,11 +831,10 @@ async def update_selectable_flights(
             adults = MAX_ADULTS
             while True:
                 section_flights = await _scrape_sections_once(page, limit=limit, seats_available=str(adults))
-                google_numbers = {}
+                google_numbers: dict[str, dict[str, Any]] = {}
                 for item in section_flights:
-                    number = _normalize_flight_number(item.get("flight_number"))
-                    if number:
-                        google_numbers[number] = item
+                    for variant in _flight_number_variants(item.get("flight_number")):
+                        google_numbers[variant] = item
 
                 for flight in flights:
                     if not isinstance(flight, dict):
@@ -838,8 +846,11 @@ async def update_selectable_flights(
                     candidates = _flight_number_candidates(flight)
                     matched = None
                     for candidate in candidates:
-                        if candidate in google_numbers:
-                            matched = google_numbers[candidate]
+                        for variant in _flight_number_variants(candidate):
+                            if variant in google_numbers:
+                                matched = google_numbers[variant]
+                                break
+                        if matched:
                             break
                     if matched:
                         gf_seats[seat_key] = str(adults)
