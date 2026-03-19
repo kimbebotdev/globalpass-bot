@@ -1,6 +1,6 @@
 import asyncio
 from io import BytesIO
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import APIRouter, Body, HTTPException
@@ -13,6 +13,53 @@ from app.utils import make_run_id
 from app.ws import RunState
 
 router = APIRouter(prefix="/api")
+
+
+def _format_segments(flight: dict[str, Any]) -> str:
+    segments = flight.get("segments") or []
+    if not isinstance(segments, list) or not segments:
+        return ""
+
+    parts: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        parts.append(
+            " ".join(
+                filter(
+                    None,
+                    [
+                        str(segment.get("flight_number") or "").strip(),
+                        f"{segment.get('departure') or ''}->{segment.get('arrival') or ''}".strip("->"),
+                        f"{segment.get('departure_time') or ''}-{segment.get('arrival_time') or ''}".strip("-"),
+                    ],
+                )
+            )
+        )
+
+    return " | ".join(part for part in parts if part)
+
+
+def _format_segment_staff_loads(flight: dict[str, Any]) -> str:
+    segments = flight.get("segments") or []
+    if not isinstance(segments, list) or not segments:
+        return ""
+
+    parts: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        seats = (segment.get("seats") or {}).get("stafftraveler") or {}
+        labels = [
+            f"BUS:{seats.get('bus') or ''}",
+            f"ECO:{seats.get('eco') or ''}",
+            f"ECO+:{seats.get('ecoplus') or ''}",
+            f"NONREV:{seats.get('nonrev') or ''}",
+            f"FIRST:{seats.get('first') or ''}",
+        ]
+        parts.append(f"{segment.get('flight_number') or ''} {' '.join(labels)}".strip())
+
+    return " | ".join(part for part in parts if part)
 
 
 def _excel_response(filename: str, sheets: dict[str, list[dict[str, Any]]]) -> StreamingResponse:
@@ -46,6 +93,9 @@ def _flatten_standby_payload(payload: list[dict[str, Any]]) -> list[dict[str, An
                 {
                     "Airline": flight.get("airline_name"),
                     "Flight Number": flight.get("flight_number"),
+                    "Segment Count": flight.get("segment_count") or 1,
+                    "Is Connection": bool(flight.get("is_connection")),
+                    "Segments": _format_segments(flight),
                     "From": flight.get("departure"),
                     "To": flight.get("arrival"),
                     "Departure Time": flight.get("departure_time"),
@@ -62,6 +112,7 @@ def _flatten_standby_payload(payload: list[dict[str, Any]]) -> list[dict[str, An
                     "StaffTraveler Economy+": staff.get("ecoplus"),
                     "StaffTraveler Non-Rev": staff.get("nonrev"),
                     "StaffTraveler First": staff.get("first"),
+                    "StaffTraveler Segment Loads": _format_segment_staff_loads(flight),
                 }
             )
     return rows
@@ -111,7 +162,7 @@ def _flatten_lookup_payload(payload: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 @router.post("/run")
-async def start_run(payload: dict[str, Any] = Body(...)):
+async def start_run(payload: Annotated[dict[str, Any], Body(...)]):
     input_data = payload.get("input") or {}
     headed = bool(payload.get("headed"))
 
