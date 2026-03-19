@@ -25,6 +25,154 @@ from app.ws import RunState
 logger = logging.getLogger("globalpass")
 
 
+def _normalize_flight_number(value: str | None) -> str:
+    return re.sub(r"\s+", "", value or "").upper()
+
+
+def _chance_to_seats(chance: str | None) -> str:
+    chance_val = (chance or "").strip().upper()
+    if chance_val == "HIGH":
+        return "9+"
+    if chance_val == "MID":
+        return "4-8"
+    if chance_val == "LOW":
+        return "0-3"
+    return ""
+
+
+def _selectable_numbers_for_flight(flight: dict[str, Any]) -> set[str]:
+    numbers: set[str] = set()
+    raw_numbers = flight.get("flight_numbers") or []
+    if isinstance(raw_numbers, list):
+        for value in raw_numbers:
+            normalized = _normalize_flight_number(str(value))
+            if normalized:
+                numbers.add(normalized)
+
+    direct_number = _normalize_flight_number(flight.get("flight_number"))
+    if direct_number and "/" not in direct_number:
+        numbers.add(direct_number)
+
+    segments = flight.get("segments") or []
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            normalized = _normalize_flight_number(segment.get("flight_number"))
+            if normalized:
+                numbers.add(normalized)
+
+    return numbers
+
+
+def _flight_identity(flight: dict[str, Any]) -> str:
+    flight_key = str(flight.get("flight_key") or "").strip()
+    if flight_key:
+        return flight_key
+
+    segment_numbers = sorted(_selectable_numbers_for_flight(flight))
+    if segment_numbers:
+        return "|".join(segment_numbers)
+
+    parts = [
+        str(flight.get("departure") or "").strip().upper(),
+        str(flight.get("arrival") or "").strip().upper(),
+        str(flight.get("departure_time") or "").strip(),
+        str(flight.get("arrival_time") or "").strip(),
+    ]
+    return "|".join(parts)
+
+
+def _build_segment_payload(segment: dict[str, Any], class_key: str) -> dict[str, Any]:
+    airline = (
+        segment.get("operatingAirline")
+        or segment.get("marketingAirline")
+        or segment.get("ticketingAirline")
+        or {}
+    )
+    from_airport = segment.get("from") if isinstance(segment.get("from"), dict) else {}
+    to_airport = segment.get("to") if isinstance(segment.get("to"), dict) else {}
+    flight_number = _normalize_flight_number(segment.get("flightNumber") or segment.get("simpleFlightNumber"))
+
+    myid_seats = {"economy": "", "business": "", "first": ""}
+    seat_value = _chance_to_seats(segment.get("chance"))
+    if seat_value:
+        myid_seats[class_key] = seat_value
+
+    return {
+        "airline_name": airline.get("name") or "",
+        "airline_code": airline.get("code") or "",
+        "flight_number": flight_number,
+        "aircraft": segment.get("aircraft") or "",
+        "departure": (from_airport or {}).get("code") or segment.get("departure") or "",
+        "departure_time": segment.get("departureTime") or "",
+        "arrival": (to_airport or {}).get("code") or segment.get("arrival") or "",
+        "arrival_time": segment.get("arrivalTime") or "",
+        "duration": segment.get("segmentDuration") or "",
+        "chance": segment.get("chance") or "",
+        "seats": {
+            "myidtravel": myid_seats,
+            "stafftraveler": {"first": "", "eco": "", "ecoplus": "", "nonrev": "", "bus": ""},
+        },
+    }
+
+
+def _build_standby_flight_payload(flight: dict[str, Any], class_key: str) -> dict[str, Any]:
+    segments_raw = flight.get("segments") or []
+    segments = [
+        _build_segment_payload(segment, class_key)
+        for segment in segments_raw
+        if isinstance(segment, dict)
+    ]
+
+    first_segment = segments[0] if segments else {}
+    last_segment = segments[-1] if segments else {}
+    flight_numbers = [segment.get("flight_number") or "" for segment in segments if segment.get("flight_number")]
+    direct_number = _normalize_flight_number(flight.get("flightNumber") or flight.get("flight_number"))
+    if direct_number and direct_number not in flight_numbers:
+        flight_numbers.append(direct_number)
+
+    flight_display_number = " / ".join(flight_numbers) or direct_number
+    myid_seats = {"economy": "", "business": "", "first": ""}
+    first_raw_segment = segments_raw[0] if isinstance(segments_raw, list) and segments_raw else {}
+    seat_value = _chance_to_seats(flight.get("chance") or first_raw_segment.get("chance"))
+    if seat_value:
+        myid_seats[class_key] = seat_value
+
+    flight_key = str(flight.get("id") or "").strip()
+    if not flight_key:
+        flight_key = "|".join(
+            [
+                flight_display_number or "unknown",
+                str(first_segment.get("departure") or ""),
+                str(last_segment.get("arrival") or ""),
+                str(first_segment.get("departure_time") or ""),
+            ]
+        )
+
+    return {
+        "flight_key": flight_key,
+        "airline_name": first_segment.get("airline_name") or "",
+        "airline_code": first_segment.get("airline_code") or "",
+        "flight_number": flight_display_number,
+        "flight_numbers": flight_numbers,
+        "aircraft": first_segment.get("aircraft") or flight.get("aircraft") or "",
+        "departure": first_segment.get("departure") or flight.get("departure") or "",
+        "departure_time": first_segment.get("departure_time") or "",
+        "arrival": last_segment.get("arrival") or flight.get("arrival") or "",
+        "arrival_time": last_segment.get("arrival_time") or "",
+        "duration": flight.get("duration") or first_segment.get("duration") or "",
+        "segment_count": len(segments) or 1,
+        "is_connection": len(segments) > 1,
+        "segments": segments,
+        "seats": {
+            "myidtravel": myid_seats,
+            "google_flights": {"economy": "", "business": "", "first": ""},
+            "stafftraveler": {"first": "", "eco": "", "ecoplus": "", "nonrev": "", "bus": ""},
+        },
+    }
+
+
 def _call_gemini(prompt: str) -> str:
     if not config.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
@@ -438,16 +586,6 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
         elif "premium" in input_class:
             class_key = "economy"
 
-        def _chance_to_seats(chance: str | None) -> str:
-            chance_val = (chance or "").strip().upper()
-            if chance_val == "HIGH":
-                return "9+"
-            if chance_val == "MID":
-                return "4-8"
-            if chance_val == "LOW":
-                return "0-3"
-            return ""
-
         standby_bots_payload = []
         for routing in myid_payload or []:
             if not isinstance(routing, dict):
@@ -460,47 +598,7 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
             for flight in flights:
                 if not isinstance(flight, dict):
                     continue
-                chance_value = flight.get("chance")
-                segments = flight.get("segments") or []
-                first_segment = segments[0] if isinstance(segments, list) and segments else {}
-                segment_chance = first_segment.get("chance") if isinstance(first_segment, dict) else None
-                seat_value = _chance_to_seats(chance_value or segment_chance)
-                myid_seats = {"economy": "", "business": "", "first": ""}
-                if seat_value:
-                    myid_seats[class_key] = seat_value
-                airline = {}
-                if isinstance(first_segment, dict):
-                    airline = (
-                        first_segment.get("operatingAirline")
-                        or first_segment.get("marketingAirline")
-                        or first_segment.get("ticketingAirline")
-                        or {}
-                    )
-                from_airport = first_segment.get("from") if isinstance(first_segment, dict) else {}
-                to_airport = first_segment.get("to") if isinstance(first_segment, dict) else {}
-                departure_code = (from_airport or {}).get("code") if isinstance(from_airport, dict) else ""
-                arrival_code = (to_airport or {}).get("code") if isinstance(to_airport, dict) else ""
-                payload_flights.append(
-                    {
-                        "airline_name": airline.get("name") or "",
-                        "airline_code": airline.get("code") or "",
-                        "flight_number": first_segment.get("flightNumber")
-                        or flight.get("flightNumber")
-                        or flight.get("flight_number")
-                        or "",
-                        "aircraft": first_segment.get("aircraft") or flight.get("aircraft") or "",
-                        "departure": departure_code or first_segment.get("departure") or "",
-                        "departure_time": first_segment.get("departureTime") or "",
-                        "arrival": arrival_code or first_segment.get("arrival") or "",
-                        "arrival_time": first_segment.get("arrivalTime") or "",
-                        "duration": first_segment.get("segmentDuration") or flight.get("duration") or "",
-                        "seats": {
-                            "myidtravel": myid_seats,
-                            "google_flights": {"economy": "", "business": "", "first": ""},
-                            "stafftraveler": {"first": "", "eco": "", "ecoplus": "", "nonrev": "", "bus": ""},
-                        },
-                    }
-                )
+                payload_flights.append(_build_standby_flight_payload(flight, class_key))
             if payload_flights:
                 standby_bots_payload.append(
                     {
@@ -535,9 +633,6 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
                 progress_cb=lambda percent, status: state.progress("stafftraveler", percent, status),
             )
 
-        def _normalize_flight_number(value: str | None) -> str:
-            return re.sub(r"\s+", "", value or "").upper()
-
         base_payload = copy.deepcopy(standby_bots_payload)
         stafftraveler_payload = None
         if state.input_data.get("auto_request_stafftraveler") and state.stafftraveler_credentials:
@@ -561,8 +656,8 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
                 for flight in routing.get("flights", []):
                     if not isinstance(flight, dict):
                         continue
-                    number = flight.get("flight_number") or ""
-                    selectable_numbers.update(_variants(number))
+                    for number in _selectable_numbers_for_flight(flight):
+                        selectable_numbers.update(_variants(number))
             stafftraveler_payload = await stafftraveler_bot.perform_stafftraveller_search(
                 headless=not headed,
                 screenshot=str(state.output_dir / "stafftraveler_request.png"),
@@ -589,18 +684,18 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
                 for flight in routing.get("flights", []) if isinstance(routing, dict) else []:
                     if not isinstance(flight, dict):
                         continue
-                    number = _normalize_flight_number(flight.get("flight_number"))
-                    if number:
-                        staff_index[number] = flight
+                    identity = _flight_identity(flight)
+                    if identity:
+                        staff_index[identity] = flight
 
         google_index: dict[str, dict[str, Any]] = {}
         for routing in google_payload:
             for flight in routing.get("flights", []) if isinstance(routing, dict) else []:
                 if not isinstance(flight, dict):
                     continue
-                number = _normalize_flight_number(flight.get("flight_number"))
-                if number:
-                    google_index[number] = flight
+                identity = _flight_identity(flight)
+                if identity:
+                    google_index[identity] = flight
 
         for routing in updated_payload:
             if not isinstance(routing, dict):
@@ -611,21 +706,25 @@ async def execute_run(state: RunState, limit: int, headed: bool) -> None:
             for flight in flights:
                 if not isinstance(flight, dict):
                     continue
-                number = _normalize_flight_number(flight.get("flight_number"))
-                if not number:
+                identity = _flight_identity(flight)
+                if not identity:
                     continue
-                google_flight = google_index.get(number)
+                google_flight = google_index.get(identity)
                 if google_flight:
                     flight["seats"] = google_flight.get("seats", flight.get("seats", {}))
                     if google_flight.get("google_flights_section"):
                         flight["google_flights_section"] = google_flight.get("google_flights_section")
-                staff_flight = staff_index.get(number)
+                staff_flight = staff_index.get(identity)
                 if staff_flight:
                     seats = flight.get("seats", {})
                     staff_seats = staff_flight.get("seats", {}).get("stafftraveler")
                     if staff_seats:
                         seats["stafftraveler"] = staff_seats
                         flight["seats"] = seats
+                    if isinstance(staff_flight.get("segments"), list):
+                        flight["segments"] = staff_flight.get("segments")
+                    if "stafftraveler_segments_matched" in staff_flight:
+                        flight["stafftraveler_segments_matched"] = staff_flight.get("stafftraveler_segments_matched")
 
         gemini_payload = None
         if config.FINAL_OUTPUT_FORMAT == "gemini":

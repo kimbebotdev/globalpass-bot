@@ -18,6 +18,7 @@ if str(BASE_DIR) not in sys.path:
 
 from app import config
 from app.bots.myidtravel_bot import read_input
+from app.utils import to_minutes
 
 # Output path for captured Google Flights results.
 OUTPUT_PATH = Path("json/google_flights_results.json")
@@ -283,15 +284,180 @@ def _seat_class_key(seat_class: str) -> str:
     return "economy"
 
 
+def _extract_flight_numbers_from_text(text: str | None) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"\b[A-Z]{1,3}\s?\d{1,4}\b", text or "", flags=re.I):
+        normalized = _normalize_flight_number(match)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            values.append(normalized)
+    return values
+
+
 def _flight_number_candidates(flight: dict[str, Any]) -> set[str]:
-    code = (flight.get("airline_code") or "").strip().upper()
-    number = _normalize_flight_number(flight.get("flight_number"))
     candidates: set[str] = set()
-    if number:
+    raw_numbers = flight.get("flight_numbers") or []
+    if isinstance(raw_numbers, list):
+        for value in raw_numbers:
+            normalized = _normalize_flight_number(str(value))
+            if normalized:
+                candidates.add(normalized)
+
+    number = _normalize_flight_number(flight.get("flight_number"))
+    if number and "/" not in number:
         candidates.add(number)
-    if code and number and not number.startswith(code):
-        candidates.add(f"{code}{number}")
+
+    segments = flight.get("segments") or []
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            normalized = _normalize_flight_number(segment.get("flight_number"))
+            if normalized:
+                candidates.add(normalized)
+
+    code = (flight.get("airline_code") or "").strip().upper()
+    if code:
+        candidates.update({f"{code}{candidate}" for candidate in list(candidates) if not candidate.startswith(code)})
     return candidates
+
+
+def _parse_stops_count(value: str | None) -> int | None:
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    if "nonstop" in text or "direct" in text:
+        return 0
+    match = re.search(r"(\d+)\s+stop", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _flight_segment_count(flight: dict[str, Any]) -> int:
+    segments = flight.get("segments") or []
+    if isinstance(segments, list):
+        count = sum(1 for segment in segments if isinstance(segment, dict))
+        if count:
+            return count
+    try:
+        return max(1, int(flight.get("segment_count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _flight_airline_names(flight: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for key in ("airline_name", "airline"):
+        value = (flight.get(key) or "").strip().lower()
+        if value:
+            names.add(value)
+
+    segments = flight.get("segments") or []
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            value = (segment.get("airline_name") or segment.get("airline") or "").strip().lower()
+            if value:
+                names.add(value)
+
+    return names
+
+
+def _google_item_variants(item: dict[str, Any]) -> set[str]:
+    values: list[str] = []
+    raw_numbers = item.get("flight_numbers") or []
+    if isinstance(raw_numbers, list):
+        values.extend(str(number) for number in raw_numbers if number)
+
+    direct_number = item.get("flight_number")
+    if direct_number:
+        values.append(str(direct_number))
+
+    summary = item.get("summary")
+    if summary:
+        values.extend(_extract_flight_numbers_from_text(str(summary)))
+
+    variants: set[str] = set()
+    for value in values:
+        variants.update(_flight_number_variants(value))
+    return variants
+
+
+def _find_best_google_match(flight: dict[str, Any], section_flights: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = _flight_number_candidates(flight)
+    target_origin = (flight.get("departure") or "").strip().upper()
+    target_destination = (flight.get("arrival") or "").strip().upper()
+    target_duration = to_minutes(flight.get("duration"))
+    target_stops = max(0, _flight_segment_count(flight) - 1)
+    target_airlines = _flight_airline_names(flight)
+
+    best_item: dict[str, Any] | None = None
+    best_score = -1
+    best_has_overlap = False
+    best_confident_connection = False
+
+    for item in section_flights:
+        item_origin = (item.get("origin") or "").strip().upper()
+        item_destination = (item.get("destination") or "").strip().upper()
+        route_match = bool(
+            target_origin
+            and target_destination
+            and item_origin == target_origin
+            and item_destination == target_destination
+        )
+
+        item_stops = _parse_stops_count(item.get("stops"))
+        stops_match = item_stops is not None and item_stops == target_stops
+
+        item_variants = _google_item_variants(item)
+        overlap = item_variants & candidates
+
+        score = 0
+        if route_match:
+            score += 20
+        if stops_match:
+            score += 20
+        if overlap:
+            score += 100 + len(overlap)
+
+        item_duration = to_minutes(item.get("duration"))
+        duration_close = False
+        if target_duration != 1440 and item_duration != 1440:
+            diff = abs(item_duration - target_duration)
+            duration_close = diff <= 60
+            if diff == 0:
+                score += 10
+            elif diff <= 15:
+                score += 8
+            elif diff <= 30:
+                score += 5
+            elif duration_close:
+                score += 2
+
+        airline = (item.get("airline") or "").strip().lower()
+        if airline and target_airlines and any(name in airline or airline in name for name in target_airlines):
+            score += 5
+
+        confident_connection = route_match and stops_match and duration_close
+        if score > best_score:
+            best_item = item
+            best_score = score
+            best_has_overlap = bool(overlap)
+            best_confident_connection = confident_connection
+
+    if not best_item:
+        return None
+
+    if _flight_segment_count(flight) <= 1:
+        return best_item if best_has_overlap else None
+
+    if best_has_overlap or (best_score >= 55 and best_confident_connection):
+        return best_item
+
+    return None
 
 
 def _build_leg_maps(
@@ -354,7 +520,7 @@ async def _scrape_section(
             if extra_details:
                 flight_data.update(extra_details)
             if target_variants:
-                scraped_variants = _flight_number_variants(flight_data.get("flight_number"))
+                scraped_variants = _google_item_variants(flight_data)
                 if scraped_variants & target_variants:
                     results.append(flight_data)
                     continue
@@ -400,6 +566,7 @@ async def _extract_flight_data(card) -> dict[str, Any]:
             aria_label = await main_link.get_attribute("aria-label")
             if aria_label:
                 flight_data["summary"] = aria_label
+                flight_data["flight_numbers"] = _extract_flight_numbers_from_text(aria_label)
 
         # Extract airline name
         # Look for airline name in the Ir0Voe div > sSHqwe span
@@ -550,12 +717,24 @@ async def _extract_extra_flight_details(card, seats_available: str) -> dict[str,
         except Exception:
             pass
 
+        flight_numbers: list[str] = []
         try:
-            flight_number = (await extra_details.locator("span.Xsgmwe.QS0io").first.inner_text()).strip()
-            if flight_number:
-                details["flight_number"] = re.sub(r"\s+", "", flight_number.replace("\xa0", " "))
+            raw_numbers = await extra_details.locator("span.Xsgmwe.QS0io").all_inner_texts()
+            for raw_number in raw_numbers:
+                normalized = _normalize_flight_number(raw_number.replace("\xa0", " "))
+                if normalized and normalized not in flight_numbers:
+                    flight_numbers.append(normalized)
         except Exception:
             pass
+        if not flight_numbers:
+            try:
+                summary = await card.locator('div[role="link"]').first.get_attribute("aria-label")
+            except Exception:
+                summary = ""
+            flight_numbers = _extract_flight_numbers_from_text(summary)
+        if flight_numbers:
+            details["flight_numbers"] = flight_numbers
+            details["flight_number"] = flight_numbers[0]
 
         try:
             aircraft_nodes = await extra_details.locator("span.Xsgmwe").all_inner_texts()
@@ -789,10 +968,20 @@ async def update_selectable_flights(
                 or fallback_class
             )
             seat_key = _seat_class_key(seat_class)
+            has_connection = any(_flight_segment_count(flight) > 1 for flight in flights if isinstance(flight, dict))
             airline_names = {
-                (f.get("airline_name") or "").strip()
-                for f in flights
-                if isinstance(f, dict) and (f.get("airline_name") or "").strip()
+                name
+                for flight in flights
+                if isinstance(flight, dict)
+                for name in {
+                    (flight.get("airline_name") or "").strip(),
+                    *[
+                        (segment.get("airline_name") or "").strip()
+                        for segment in (flight.get("segments") or [])
+                        if isinstance(segment, dict)
+                    ],
+                }
+                if name
             }
 
             await page.goto("https://www.google.com/travel/flights")
@@ -824,17 +1013,14 @@ async def update_selectable_flights(
 
             if nonstop_only:
                 await _apply_nonstop_filter(page)
-            await _apply_airline_filter(page, airline_names)
+            if airline_names and not has_connection:
+                await _apply_airline_filter(page, airline_names)
 
             await _wait_for_results(page, timeout_ms=15000)
 
             adults = MAX_ADULTS
             while True:
                 section_flights = await _scrape_sections_once(page, limit=limit, seats_available=str(adults))
-                google_numbers: dict[str, dict[str, Any]] = {}
-                for item in section_flights:
-                    for variant in _flight_number_variants(item.get("flight_number")):
-                        google_numbers[variant] = item
 
                 for flight in flights:
                     if not isinstance(flight, dict):
@@ -843,15 +1029,7 @@ async def update_selectable_flights(
                     gf_seats = seats.get("google_flights") or {}
                     if gf_seats.get(seat_key):
                         continue
-                    candidates = _flight_number_candidates(flight)
-                    matched = None
-                    for candidate in candidates:
-                        for variant in _flight_number_variants(candidate):
-                            if variant in google_numbers:
-                                matched = google_numbers[variant]
-                                break
-                        if matched:
-                            break
+                    matched = _find_best_google_match(flight, section_flights)
                     if matched:
                         gf_seats[seat_key] = str(adults)
                         seats["google_flights"] = gf_seats

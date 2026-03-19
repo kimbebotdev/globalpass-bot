@@ -882,6 +882,61 @@ def _map_staff_seats(seats: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _staff_seat_rank(value: str | None) -> int | None:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    if text.endswith("+") and text[:-1].isdigit():
+        return int(text[:-1])
+    if text.isdigit():
+        return int(text)
+    range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", text)
+    if range_match:
+        return int(range_match.group(1))
+
+    status_ranks = {
+        "CLOSED": 0,
+        "FULL": 0,
+        "NONE": 0,
+        "LOW": 1,
+        "MID": 5,
+        "HIGH": 9,
+        "OPEN": 9,
+        "AVAILABLE": 9,
+    }
+    return status_ranks.get(text)
+
+
+def _aggregate_staff_seats(segment_seats: list[dict[str, str]]) -> dict[str, str]:
+    aggregated: dict[str, str] = {}
+    for key in ("first", "bus", "eco", "ecoplus", "nonrev"):
+        values = [str(seats.get(key) or "").strip() for seats in segment_seats]
+        non_empty = [value for value in values if value]
+        if not non_empty or len(non_empty) != len(values):
+            aggregated[key] = ""
+            continue
+
+        ranked = [(_staff_seat_rank(value), value) for value in non_empty]
+        if all(rank is not None for rank, _value in ranked):
+            aggregated[key] = min(ranked, key=lambda item: item[0] or 0)[1]
+        elif len(set(non_empty)) == 1:
+            aggregated[key] = non_empty[0]
+        else:
+            aggregated[key] = " / ".join(non_empty)
+
+    return aggregated
+
+
+def _match_staff_flight(
+    staff_by_number: dict[str, dict[str, Any]],
+    flight_number: str | None,
+) -> dict[str, Any] | None:
+    variants = _flight_number_variants(flight_number)
+    if not variants:
+        return None
+    return next((staff_by_number.get(variant) for variant in variants if variant in staff_by_number), None)
+
+
 async def update_selectable_flights(
     headless: bool,
     selectable_payload: list[dict[str, Any]],
@@ -915,13 +970,42 @@ async def update_selectable_flights(
         for flight in flights:
             if not isinstance(flight, dict):
                 continue
-            variants = _flight_number_variants(flight.get("flight_number"))
-            if not variants:
-                continue
-            staff_match = next((staff_by_number.get(v) for v in variants if v in staff_by_number), None)
+            seats = flight.get("seats") or {}
+            segments = flight.get("segments") or []
+            matched_segment_seats: list[dict[str, str]] = []
+
+            if isinstance(segments, list) and segments:
+                for segment in segments:
+                    if not isinstance(segment, dict):
+                        continue
+                    staff_match = _match_staff_flight(staff_by_number, segment.get("flight_number"))
+                    if not staff_match:
+                        continue
+                    mapped_seats = _map_staff_seats(staff_match.get("seats", {}))
+                    segment_seats = segment.get("seats") or {}
+                    segment_seats["stafftraveler"] = mapped_seats
+                    segment["seats"] = segment_seats
+                    segment["stafftraveler_match"] = {
+                        "airline": staff_match.get("airline", ""),
+                        "flight_number": staff_match.get("flight_number", ""),
+                        "date": staff_match.get("date", ""),
+                        "origin": staff_match.get("origin", ""),
+                        "destination": staff_match.get("destination", ""),
+                        "departure_time": staff_match.get("departure_time", ""),
+                        "arrival_time": staff_match.get("arrival_time", ""),
+                        "duration": staff_match.get("duration", ""),
+                    }
+                    matched_segment_seats.append(mapped_seats)
+
+                if matched_segment_seats:
+                    seats["stafftraveler"] = _aggregate_staff_seats(matched_segment_seats)
+                    flight["seats"] = seats
+                    flight["stafftraveler_segments_matched"] = len(matched_segment_seats)
+                    continue
+
+            staff_match = _match_staff_flight(staff_by_number, flight.get("flight_number"))
             if not staff_match:
                 continue
-            seats = flight.get("seats") or {}
             seats["stafftraveler"] = _map_staff_seats(staff_match.get("seats", {}))
             flight["seats"] = seats
 
