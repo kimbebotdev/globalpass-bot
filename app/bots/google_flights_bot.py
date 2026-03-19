@@ -546,7 +546,7 @@ async def _extract_flight_data(card) -> dict[str, Any]:
     Extract flight details from a single flight card element.
     Based on the structure in Sample LI.html
     """
-    flight_data = {
+    flight_data: dict[str, Any] = {
         "airline": "",
         "price": "",
         "duration": "",
@@ -696,7 +696,7 @@ async def _extract_flight_data(card) -> dict[str, Any]:
 
 
 async def _extract_extra_flight_details(card, seats_available: str) -> dict[str, Any]:
-    details = {}
+    details: dict[str, Any] = {}
     try:
         toggle = card.locator("svg.SadNne.NMm5M").first
         if await toggle.count():
