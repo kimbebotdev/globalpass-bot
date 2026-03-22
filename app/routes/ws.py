@@ -1,5 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.config import GLOBALPASS_API_KEY
 from app.state import RUNS
 
 router = APIRouter()
@@ -7,6 +8,14 @@ router = APIRouter()
 
 @router.websocket("/ws/{run_id}")
 async def websocket_run(ws: WebSocket, run_id: str):
+    api_key = ws.headers.get("X-API-Key")
+    if not GLOBALPASS_API_KEY:
+        await ws.close(code=1011)
+        return
+    if not api_key or api_key != GLOBALPASS_API_KEY:
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
     state = RUNS.get(run_id)
     if not state:

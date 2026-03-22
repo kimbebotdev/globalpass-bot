@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app import config
 from app.db import ensure_data_dir
+from app.middleware.api_key import APIKeyMiddleware
 from app.routes import accounts, airlines, auth, lookup, runs, ws
 from app.routes import slack as slack_routes
 from app.slack import SLACK_ENABLED, start_slack_bot, stop_slack_bot
@@ -36,6 +37,7 @@ app.add_middleware(
 if not SECRET_KEY:
     logger.warning("SECRET_KEY is not set; session authentication will not work.")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+app.add_middleware(APIKeyMiddleware)
 
 
 @app.on_event("startup")
