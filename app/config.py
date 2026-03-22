@@ -28,6 +28,12 @@ API_PORT = int(os.getenv("API_PORT", 8000))
 FINAL_OUTPUT_FORMAT = os.getenv("FINAL_OUTPUT_FORMAT", "default").strip().lower()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GLOBALPASS_API_KEY = os.getenv("GLOBALPASS_API_KEY")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 # Form selectors
 ORIGIN_SELECTOR = "#Origin"
